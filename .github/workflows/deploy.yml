@@ -50,16 +50,21 @@ jobs:
       - name: 📝 Create wrangler.toml
         run: |
           cat > wrangler.toml << 'WEOF'
-          name = "server-monitor-pro"
+          name = "cf-server-monitor"
           main = "src/index.js"
           compatibility_date = "2024-12-01"
           compatibility_flags = ["nodejs_compat"]
+          workers_dev = false
+
+          [[routes]]
+          pattern = "cfsm.11112003.xyz"
+          custom_domain = true
 
           # 定时任务配置（UTC）
-          # - 每分钟：执行离线节点检测
-          # - 每小时：合并执行其他定时任务（每月1号数据清理、每月8号清理旧表、每天12点服务器到期检测）
+          # - 每小时：执行表轮换和到期检测
+          # - 离线/资源告警由 Uptime Kuma 负责，避免每分钟 Cron 消耗 Workers 额度
           [triggers]
-          crons = ["*/1 * * * *", "0 * * * *"]
+          crons = ["0 * * * *"]
 
           [assets]
           directory = "./dist"
