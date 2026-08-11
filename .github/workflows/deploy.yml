@@ -55,7 +55,6 @@ jobs:
           compatibility_date = "2024-12-01"
           compatibility_flags = ["nodejs_compat"]
           workers_dev = false
-          keep_vars = true
 
           [[routes]]
           pattern = "cfsm.11112003.xyz"
