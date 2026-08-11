@@ -9,6 +9,7 @@ on:
       - '.gitignore'
       - 'LICENSE'
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   check:

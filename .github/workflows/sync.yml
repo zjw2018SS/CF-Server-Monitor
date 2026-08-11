@@ -13,6 +13,8 @@ jobs:
     name: Sync latest commits from upstream repo
     runs-on: ubuntu-latest
     if: ${{ github.event.repository.fork }}
+    outputs:
+      has_new_commits: ${{ steps.sync.outputs.has_new_commits }}
 
     steps:
       # Step 1: run a standard checkout action
@@ -38,3 +40,10 @@ jobs:
           echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，请前往仓库页面手动执行 Sync Fork 操作。"
           echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork."
           exit 1
+
+  deploy:
+    name: Deploy synced changes
+    needs: sync_latest_from_upstream
+    if: needs.sync_latest_from_upstream.outputs.has_new_commits == 'true'
+    uses: ./.github/workflows/deploy.yml
+    secrets: inherit
