@@ -230,6 +230,7 @@
         :install-gh-proxy="installGhProxy"
         :collect-interval="collectInterval"
         :report-interval="reportInterval"
+        :wss-report-interval="wssReportInterval"
         :connection-mode="connectionMode"
         :custom-ct="customCt"
         :custom-cu="customCu"
@@ -712,6 +713,8 @@ const normalizeResourceAlertRulesSetting = (value) => {
 
 const isResourceAlertEnabled = (rules) => normalizeResourceAlertRulesSetting(rules).length > 0
 
+const isNotificationWebhookEnabled = () => settings.value.notification_webhook_enabled === true
+
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 const formatThemeOptions = (value) => {
@@ -834,6 +837,13 @@ const settings = ref({
   resource_alert_rules: [],
   tg_bot_token: '',
   tg_chat_id: '',
+  notification_webhook_enabled: false,
+  notification_webhook_url: '',
+  notification_webhook_method: 'POST',
+  notification_webhook_format: 'json',
+  notification_webhook_headers: '',
+  notification_webhook_body: '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
+  notification_template: '{{emoji}}【CF Server Monitor】{{event}}\n服务器: {{client}}\n详情:\n{{message}}\n时间: {{time}}',
   turnstile_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
@@ -873,7 +883,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
 ])
 
 const {
@@ -902,6 +912,7 @@ const editForm = ref({
   reset_day: 1,
   collect_interval: 0,
   report_interval: 60,
+  wss_report_interval: 2,
   connection_mode: 'auto',
   custom_ct: '',
   custom_cu: '',
@@ -951,6 +962,7 @@ const targetOs = ref('linux')
 const installGhProxy = ref('')
 const collectInterval = ref(0)
 const reportInterval = ref(60)
+const wssReportInterval = ref(2)
 const connectionMode = ref('auto')
 const customCt = ref('')
 const customCu = ref('')
@@ -1090,7 +1102,7 @@ const handleLogin = async () => {
 
 const logout = async () => {
   try {
-    await adminApiForSite({ action: 'clear_theme_preview_auth' })
+    await adminApiForSite({ action: 'logout' })
   } catch (_) {
   }
   apiLogout()
@@ -1205,6 +1217,13 @@ const loadSettings = async () => {
         resource_alert_rules: normalizeResourceAlertRulesSetting(settingsData.resource_alert_rules),
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
+        notification_webhook_enabled: settingsData.notification_webhook_enabled === 'true' || settingsData.notification_webhook_enabled === true,
+        notification_webhook_url: settingsData.notification_webhook_url || '',
+        notification_webhook_method: String(settingsData.notification_webhook_method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST',
+        notification_webhook_format: ['json', 'form', 'text'].includes(String(settingsData.notification_webhook_format || '').toLowerCase()) ? String(settingsData.notification_webhook_format).toLowerCase() : 'json',
+        notification_webhook_headers: settingsData.notification_webhook_headers || '',
+        notification_webhook_body: settingsData.notification_webhook_body || '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
+        notification_template: settingsData.notification_template || '{{emoji}}【CF Server Monitor】{{event}}\n服务器: {{client}}\n详情:\n{{message}}\n时间: {{time}}',
         turnstile_enabled: settingsData.turnstile_enabled === 'true',
         turnstile_login_enabled: settingsData.turnstile_login_enabled === 'true',
         turnstile_site_key: settingsData.turnstile_site_key || '',
@@ -1291,7 +1310,12 @@ const saveSettings = async () => {
   }
 
   if (isTgNotifyEnabled(settings.value.tg_notify) || isExpireReminderEnabled(settings.value.expire_reminder) || isResourceAlertEnabled(settings.value.resource_alert_rules)) {
-    if (!settings.value.tg_bot_token || settings.value.tg_bot_token.trim().length === 0) {
+    if (isNotificationWebhookEnabled()) {
+      if (!settings.value.notification_webhook_url || settings.value.notification_webhook_url.trim().length === 0) {
+        validationError.value = trans.value.notificationWebhookUrlRequired || 'Webhook URL is required'
+        return
+      }
+    } else if (!settings.value.tg_bot_token || settings.value.tg_bot_token.trim().length === 0) {
       validationError.value = trans.value.tgBotTokenRequired
       return
     }
@@ -1344,6 +1368,13 @@ const saveSettings = async () => {
       resource_alert_rules: normalizeResourceAlertRulesSetting(settings.value.resource_alert_rules),
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
+      notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
+      notification_webhook_url: settings.value.notification_webhook_url,
+      notification_webhook_method: settings.value.notification_webhook_method === 'GET' ? 'GET' : 'POST',
+      notification_webhook_format: ['json', 'form', 'text'].includes(settings.value.notification_webhook_format) ? settings.value.notification_webhook_format : 'json',
+      notification_webhook_headers: settings.value.notification_webhook_headers,
+      notification_webhook_body: settings.value.notification_webhook_body,
+      notification_template: settings.value.notification_template,
       turnstile_enabled: settings.value.turnstile_enabled ? 'true' : 'false',
       turnstile_login_enabled: settings.value.turnstile_login_enabled ? 'true' : 'false',
       turnstile_site_key: settings.value.turnstile_site_key,
@@ -1472,6 +1503,7 @@ const copyCmd = (serverId) => {
   installGhProxy.value = ''
   collectInterval.value = server?.collect_interval ?? 0
   reportInterval.value = server?.report_interval || 60
+  wssReportInterval.value = server?.wss_report_interval || 2
   connectionMode.value = getEffectiveConnectionMode(server?.connection_mode)
   customCt.value = server?.custom_ct || settings.value.custom_ct
   customCu.value = server?.custom_cu || settings.value.custom_cu
@@ -1607,6 +1639,7 @@ const openEditModal = (server) => {
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
     report_interval: server.report_interval || 60,
+    wss_report_interval: server.wss_report_interval || 2,
     connection_mode: getEffectiveConnectionMode(server.connection_mode),
     custom_ct: server.custom_ct || '',
     custom_cu: server.custom_cu || '',
@@ -1693,6 +1726,7 @@ const saveEdit = async () => {
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
     report_interval: editForm.value.report_interval,
+    wss_report_interval: editForm.value.wss_report_interval,
     connection_mode: getEffectiveConnectionMode(editForm.value.connection_mode),
     custom_ct: pingNodeValidation.values.custom_ct,
     custom_cu: pingNodeValidation.values.custom_cu,
@@ -1926,7 +1960,14 @@ const sendTestNotification = async () => {
     const result = await adminApiForSite({
       action: 'send_test_notification',
       tg_bot_token: settings.value.tg_bot_token,
-      tg_chat_id: settings.value.tg_chat_id
+      tg_chat_id: settings.value.tg_chat_id,
+      notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
+      notification_webhook_url: settings.value.notification_webhook_url,
+      notification_webhook_method: settings.value.notification_webhook_method,
+      notification_webhook_format: settings.value.notification_webhook_format,
+      notification_webhook_headers: settings.value.notification_webhook_headers,
+      notification_webhook_body: settings.value.notification_webhook_body,
+      notification_template: settings.value.notification_template
     })
     if (!result.error) {
       alertMessage.value = getMessage(result.data.message) || trans.value.testNotificationSent
