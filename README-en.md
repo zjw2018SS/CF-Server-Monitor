@@ -10,7 +10,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.4%20Beta3-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.4%20Beta4-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#license)
@@ -99,8 +99,7 @@ Core flow:
 
 Recent changes:
 
-- `2.8.4 Beta3`: Added custom Webhook notification channel, GET/POST custom parameters, unified notification templates, and the `{{emoji}}` variable. Test notification now sends the rendered template.
-- `2.8.4`: Added Agent WSS reporting to improve realtime push latency, added account usage for D1 / Workers / Durable Objects, and reduced idle Durable Object realtime broadcast requests when no frontend is subscribed.
+- `2.8.4`: Added Agent WSS reporting for improved real-time data push timeliness, added account Do usage display with optimized Do broadcast requests when no frontend subscription exists to reduce idle quota consumption, added custom Webhook channel in notification settings, and added frontend WSS timeout configuration.
 - `2.8.3`: Added disk IO metrics, switched the default Agent to Go, and added realtime latency / packet-loss windows.
 - `2.8.2`: Added Go Agent support.
 - `2.8.1`: Optimized long-range D1 history reads, added resource load notifications, and improved the theme store API.
@@ -416,6 +415,10 @@ Send a test notification before saving.
 - Use a random strong value and avoid characters that are likely to be escaped by shells or URLs.
 - After changing `API_SECRET`, redeploy the Worker and reinstall or update all Agents.
 - Keep the admin password separate from `API_SECRET` for long-term use.
+
+### Frontend WebSocket Timeout
+
+Admin settings can configure the frontend WSS timeout in minutes. The default `0` disables time-based disconnects; a positive value closes the built-in frontend subscription at the limit and prompts the user to close or continue.
 
 ### Turnstile
 
