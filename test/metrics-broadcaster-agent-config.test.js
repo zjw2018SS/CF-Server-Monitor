@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsBroadcaster } from '../src/durable/MetricsBroadcaster.js';
-import { getHistoryMetrics, handleWebSocketUpgrade } from '../src/handlers/update.js';
+import { getHistoryMetrics, handleUpdateWebSocketUpgrade, handleWebSocketUpgrade } from '../src/handlers/update.js';
 import { buildAuthCookie, generateToken } from '../src/middleware/auth.js';
+import { buildResourceAlertNotificationPayloads } from '../src/services/notification.js';
+import { clearSiteSettingsCache, DEFAULT_NOTIFICATION_TEMPLATE, normalizeNotificationTemplate, normalizeResourceAlertRules } from '../src/utils/settings.js';
 
 globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {
   constructor(request, response) {
@@ -163,6 +165,68 @@ test('private frontend WebSocket accepts auth cookie', async () => {
 
   assert.equal(response.status, 101);
   assert.equal(forwarded, true);
+});
+
+test('Agent WSS upgrade follows the configured UTC hour schedule', async () => {
+  const currentHour = new Date().getUTCHours();
+  let forwarded = false;
+  clearSiteSettingsCache();
+  const enabledResponse = await handleUpdateWebSocketUpgrade(
+    makeWebSocketUpgradeRequest('https://example.com/update'),
+    makeWebSocketEnv({
+      wss_report_enabled: 'true',
+      wss_report_hours: [currentHour]
+    }, () => {
+      forwarded = true;
+    })
+  );
+
+  assert.equal(enabledResponse.status, 101);
+  assert.equal(forwarded, true);
+
+  clearSiteSettingsCache();
+  forwarded = false;
+  const disabledResponse = await handleUpdateWebSocketUpgrade(
+    makeWebSocketUpgradeRequest('https://example.com/update'),
+    makeWebSocketEnv({
+      wss_report_enabled: 'true',
+      wss_report_hours: [(currentHour + 1) % 24]
+    }, () => {
+      forwarded = true;
+    })
+  );
+
+  assert.equal(disabledResponse.status, 409);
+  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Mode'), 'inactive');
+  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Reason'), 'wss_schedule_inactive');
+  const disabledBody = await disabledResponse.json();
+  assert.equal(disabledBody.text, 'wss_schedule_inactive');
+  assert.equal(disabledBody.connection_mode, 'http');
+  assert.equal(forwarded, false);
+});
+
+test('Durable Object rechecks Agent WSS schedule before accepting a socket', async () => {
+  clearSiteSettingsCache();
+  const currentHour = new Date().getUTCHours();
+  const broadcaster = makeBroadcaster([], {
+    DB: makeSettingsDb({
+      wss_report_enabled: 'true',
+      wss_report_hours: [(currentHour + 1) % 24]
+    })
+  });
+
+  const response = await broadcaster._handleAgentReportWebSocket(
+    makeWebSocketUpgradeRequest('http://internal/update'),
+    new URL('http://internal/update')
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(response.headers.get('X-Agent-Wss-Mode'), 'inactive');
+  assert.equal(response.headers.get('X-Agent-Wss-Reason'), 'wss_schedule_inactive');
+  const body = await response.json();
+  assert.equal(body.text, 'wss_schedule_inactive');
+  assert.equal(body.connection_mode, 'http');
+  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
 });
 
 test('WSS agent config state only requests ack for fields in current report', () => {
@@ -512,6 +576,48 @@ test('agent report mode change closes existing Agent WSS when disabled', async (
   }]);
 });
 
+test('Agent WSS closes on the first report after entering a disabled UTC hour', async () => {
+  clearSiteSettingsCache();
+  const currentHour = new Date().getUTCHours();
+  const sent = [];
+  const closed = [];
+  let attachment = {
+    kind: 'agent-report',
+    authenticated: true,
+    serverId: 'server-1',
+    wssScheduleCheckAfter: Date.now() - 1
+  };
+  const ws = {
+    serializeAttachment(value) {
+      attachment = value;
+    },
+    send(message) {
+      sent.push(JSON.parse(message));
+    },
+    close(code, reason) {
+      closed.push({ code, reason });
+    }
+  };
+  const broadcaster = makeBroadcaster([], {
+    DB: makeSettingsDb({
+      wss_report_enabled: 'true',
+      wss_report_hours: [(currentHour + 1) % 24]
+    })
+  });
+
+  await broadcaster._handleAgentReportMessage(ws, JSON.stringify({ metrics: { cpu: 1 } }), attachment);
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, 'error');
+  assert.equal(sent[0].code, 409);
+  assert.equal(sent[0].text, 'wss_schedule_inactive');
+  assert.equal(sent[0].connection_mode, 'http');
+  assert.deepEqual(closed, [{
+    code: 1013,
+    reason: 'wss_schedule_inactive'
+  }]);
+});
+
 test('batch push latestReportOnly keeps latest report updates without subscribers', async () => {
   const broadcaster = makeBroadcaster([]);
   const response = await broadcaster.fetch(new Request('http://internal/batch-push', {
@@ -537,7 +643,7 @@ test('batch push latestReportOnly keeps latest report updates without subscriber
   const latestResponse = await broadcaster.fetch(new Request('http://internal/latest-report-updates', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ serverIds: ['server-1'], includeLatencyWindows: false })
+    body: JSON.stringify({ serverIds: ['server-1'] })
   }));
   const latest = await latestResponse.json();
 
@@ -611,6 +717,73 @@ test('resource alert batch evaluation returns results per rule', async () => {
   assert.deepEqual(byRule.get('cpu-rule').evaluatedServerIds, ['server-1']);
   assert.equal(byRule.get('ram-rule').alerts.length, 0);
   assert.deepEqual(byRule.get('ram-rule').evaluatedServerIds, ['server-1']);
+});
+
+test('resource alert notification payloads group metrics by server and split long batches', () => {
+  const alertNodes = [];
+  alertNodes.push({
+    rule: { name: 'CPU Alert', intervalMinutes: '5' },
+    server: { name: 'shared-server' },
+    alert: {
+      mode: 'average',
+      metrics: [{ metric: 'cpu', mode: 'average', threshold: 1, current: 1.05, triggerValue: 1.05 }]
+    }
+  });
+  alertNodes.push({
+    rule: { name: 'RAM Alert', intervalMinutes: '5' },
+    server: { name: 'shared-server' },
+    alert: {
+      mode: 'average',
+      metrics: [{ metric: 'ram', mode: 'average', threshold: 1, current: 42.7, triggerValue: 42.7 }]
+    }
+  });
+  for (let index = 0; index < 180; index++) {
+    alertNodes.push({
+      rule: { name: 'RAM Alert', intervalMinutes: '5' },
+      server: { name: `ram-server-${String(index).padStart(2, '0')}` },
+      alert: {
+        mode: 'average',
+        metrics: [{ metric: 'ram', mode: 'average', threshold: 1, current: 80, triggerValue: 80 }]
+      }
+    });
+  }
+  alertNodes.push({
+    rule: { name: 'CPU Alert', intervalMinutes: '5' },
+    server: { name: 'cpu-server' },
+    alert: {
+      mode: 'average',
+      metrics: [{ metric: 'cpu', mode: 'average', threshold: 1, current: 90, triggerValue: 90 }]
+    }
+  });
+
+  const payloads = buildResourceAlertNotificationPayloads(alertNodes, [], '2026/08/20 12:00:00');
+
+  assert.equal(payloads.length > 1, true);
+  assert.equal(payloads.some(payload => payload.msg.includes('shared-server  CPU 1.05%  RAM 42.7%')), true);
+  assert.equal(payloads.some(payload => payload.msg.includes('cpu-server  CPU 90.0%')), true);
+  assert.equal(payloads.every(payload => payload.msg.length <= 3200), true);
+});
+
+test('legacy default notification template normalizes to concise default', () => {
+  const legacy = '{{emoji}}【CF Server Monitor】{{event}}\n服务器: {{client}}\n详情:\n{{message}}\n时间: {{time}}';
+  const previousConcise = '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n时间: {{time}}';
+  assert.equal(normalizeNotificationTemplate(legacy), DEFAULT_NOTIFICATION_TEMPLATE);
+  assert.equal(normalizeNotificationTemplate(previousConcise), DEFAULT_NOTIFICATION_TEMPLATE);
+  assert.equal(DEFAULT_NOTIFICATION_TEMPLATE.includes('服务器:'), false);
+  assert.equal(DEFAULT_NOTIFICATION_TEMPLATE.includes('时间:'), false);
+  assert.equal(DEFAULT_NOTIFICATION_TEMPLATE.includes('{{message}}'), true);
+});
+
+test('resource alert rule ids remain unique when duplicate ids are already max length', () => {
+  const id = 'a'.repeat(64);
+  const rules = normalizeResourceAlertRules([
+    { id, metric: 'cpu', threshold: 80, servers: ['server-1'], intervalMinutes: 5 },
+    { id, metric: 'ram', threshold: 80, servers: ['server-1'], intervalMinutes: 5 }
+  ]);
+
+  assert.equal(rules.length, 2);
+  assert.notEqual(rules[0].id, rules[1].id);
+  assert.equal(rules.every(rule => rule.id.length <= 64), true);
 });
 
 test('resource alert cache accepts payload samples from WSS broadcasts', async () => {

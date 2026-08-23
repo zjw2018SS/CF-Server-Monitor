@@ -22,7 +22,10 @@
 
         <div class="form-row">
           <div class="form-group  ">
-            <label class="form-label">{{ trans.bgImage }}</label>
+            <label class="form-label">
+              {{ trans.bgImage }}
+              <HelpTooltip :text="trans.remoteImageTip" />
+            </label>
             <div class="flex" style="gap:8px;">
               <input type="text" v-model="settings.custom_bg" class="form-input flex-1" placeholder="https://...">
               <div class="upload-btn-wrapper">
@@ -34,7 +37,27 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label">{{ trans.favicon }}</label>
+            <label class="form-label">
+              {{ trans.mobileBgImage }}
+              <HelpTooltip :text="trans.remoteImageTip" />
+            </label>
+            <div class="flex" style="gap:8px;">
+              <input type="text" v-model="settings.custom_bg_mobile" class="form-input flex-1" placeholder="https://...">
+              <div class="upload-btn-wrapper">
+                <button class="btn btn-margin-0">📁 {{ trans.upload }}</button>
+                <input type="file" accept="image/*" @change="$emit('upload-bg-mobile', $event)">
+              </div>
+            </div>
+            <img v-if="settings.custom_bg_mobile" :src="settings.custom_bg_mobile" class="bg-preview">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">
+              {{ trans.favicon }}
+              <HelpTooltip :text="trans.remoteImageTip" />
+            </label>
             <div class="flex" style="gap:8px;">
               <input type="text" v-model="settings.favicon" class="form-input flex-1" placeholder="https://...">
               <div class="upload-btn-wrapper">
@@ -48,9 +71,11 @@
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.themeOptions }}</label>
+            <label class="form-label">
+              {{ trans.themeOptions }}
+              <HelpTooltip :text="trans.themeOptionsTip" />
+            </label>
             <textarea v-model="settings.theme_options" class="form-textarea" rows="5" placeholder='{"mikus":1}'></textarea>
-            <p class="text-muted text-sm mt-1">{{ trans.themeOptionsTip }}</p>
           </div>
         </div>
       </div>
@@ -60,7 +85,10 @@
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customHead }}</label>
+            <label class="form-label">
+              {{ trans.customHead }}
+              <HelpTooltip :text="trans.cspWarning" />
+            </label>
             <textarea v-model="settings.custom_head" class="form-textarea" rows="3" placeholder="<link rel='stylesheet' href='...'">
             </textarea>
           </div>
@@ -74,24 +102,24 @@
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.cspStatic }}</label>
+            <label class="form-label">
+              {{ trans.cspStatic }}
+              <HelpTooltip :text="trans.cspStaticTip" />
+            </label>
             <input type="text" v-model="settings.csp_static" class="form-input" placeholder="https://unpkg.com,https://cdn.jsdelivr.net" @blur="validateCspField('csp_static')">
-            <p class="text-muted text-sm mt-1">{{ trans.cspStaticTip }}</p>
             <p v-if="cspErrors.csp_static" class="text-danger text-sm">{{ cspErrors.csp_static }}</p>
           </div>
 
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.cspApi }}</label>
+            <label class="form-label">
+              {{ trans.cspApi }}
+              <HelpTooltip :text="trans.cspApiTip" />
+            </label>
             <input type="text" v-model="settings.csp_api" class="form-input" placeholder="https://api.example.com" @blur="validateCspField('csp_api')">
-            <p class="text-muted text-sm mt-1">{{ trans.cspApiTip }}</p>
             <p v-if="cspErrors.csp_api" class="text-danger text-sm">{{ cspErrors.csp_api }}</p>
           </div>
         </div>
 
-        <p class="text-muted text-sm mt-2">
-          <span class="warning-icon">[i]</span>
-          {{ trans.cspWarning }}
-        </p>
       </div>
 
       <div class="settings-section">
@@ -118,23 +146,52 @@
           <div class="form-group flex-1 checkbox-item">
             <input type="checkbox" id="cfg_wss_report_enabled" v-model="settings.wss_report_enabled">
             <label><b>{{ trans.wssReportEnabled }}</b></label>
+            <HelpTooltip :text="trans.wssReportTip" />
           </div>
           <div class="form-group flex-1 checkbox-item">
             <input type="checkbox" id="cfg_show_tf" v-model="settings.show_tf">
             <label>{{ trans.showTf }}</label>
           </div>
+          <div class="form-group flex-1 checkbox-item">
+            <input type="checkbox" id="cfg_show_three_net_details" v-model="settings.show_three_net_details">
+            <label>{{ trans.showThreeNetDetails }}</label>
+          </div>
         </div>
 
-        <div class="form-group">
-          <p class="text-muted text-sm mt-1">
-            <span class="warning-icon">[i]</span>
-            {{ trans.wssReportTip }}
-          </p>
+        <div v-if="settings.wss_report_enabled" class="wss-schedule">
+          <div class="wss-schedule-header">
+            <div>
+              <div class="form-label wss-schedule-title">
+                {{ trans.wssReportHours }}
+                <HelpTooltip :text="trans.wssReportHoursTip" />
+              </div>
+              <div class="wss-schedule-meta">
+                {{ localTimezoneLabel }} · {{ wssReportHours.length }}/24 {{ trans.hoursSelected }} · {{ trans.agentWssMinVersion }}
+              </div>
+            </div>
+            <div class="wss-schedule-actions">
+              <button type="button" class="btn btn-sm" @click="selectAllWssReportHours">{{ trans.selectAll }}</button>
+              <button type="button" class="btn btn-sm" @click="clearWssReportHours">{{ trans.clear }}</button>
+            </div>
+          </div>
+          <div class="wss-hour-grid" role="group" :aria-label="trans.wssReportHours">
+            <label v-for="hour in 24" :key="hour - 1" class="wss-hour-option" :title="formatWssHourRange(hour - 1)">
+              <input
+                type="checkbox"
+                :checked="isLocalWssReportHourSelected(hour - 1)"
+                @change="toggleLocalWssReportHour(hour - 1, $event.target.checked)"
+              >
+              <span>{{ String(hour - 1).padStart(2, '0') }}</span>
+            </label>
+          </div>
         </div>
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.frontendWsTimeoutMinutes }}</label>
+            <label class="form-label">
+              {{ trans.frontendWsTimeoutMinutes }}
+              <HelpTooltip :text="trans.frontendWsTimeoutMinutesTip" />
+            </label>
             <input
               v-model.number="settings.frontend_ws_timeout_minutes"
               type="number"
@@ -143,15 +200,16 @@
               step="1"
               class="form-input"
             >
-            <p class="text-muted text-sm mt-1">{{ trans.frontendWsTimeoutMinutesTip }}</p>
           </div>
 
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.longHistoryPoints }}</label>
+            <label class="form-label">
+              {{ trans.longHistoryPoints }}
+              <HelpTooltip :text="trans.longHistoryPointsTip" />
+            </label>
             <select v-model="settings.long_history_points" class="form-select">
               <option v-for="option in longHistoryPointOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
-            <p class="text-muted text-sm mt-1">{{ trans.longHistoryPointsTip }}</p>
           </div>
         </div>
       </div>
@@ -178,6 +236,35 @@
             <select v-model="notificationChannel" class="form-select">
               <option value="builtin">{{ trans.builtinNotification || 'Built-in' }}</option>
               <option value="webhook">{{ trans.customWebhook || 'Custom Webhook' }}</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.notificationTimezone || 'Notification Timezone' }}
+              <HelpTooltip :text="trans.notificationTimezoneTip || 'Used only for notification output times and expiration reminder schedule.'" />
+            </label>
+            <input
+              type="text"
+              list="notification-timezone-options"
+              v-model.trim="settings.notification_timezone"
+              class="form-input"
+              placeholder="UTC"
+            >
+            <datalist id="notification-timezone-options">
+              <option v-for="timezone in commonNotificationTimezones" :key="timezone" :value="timezone"></option>
+            </datalist>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.expireNotificationTime || 'Expiration Notification Time' }}
+              <HelpTooltip :text="trans.expireNotificationTimeTip || 'Check expiration and send reminders daily at this hour in the notification timezone. Use 0-23.'" />
+            </label>
+            <select v-model="settings.expire_notification_time" class="form-select">
+              <option v-for="hour in expireNotificationHourOptions" :key="hour" :value="hour">{{ hour }}</option>
             </select>
           </div>
         </div>
@@ -281,7 +368,7 @@
               v-model="settings.notification_template"
               class="form-textarea"
               rows="5"
-              placeholder="{{emoji}}【CF Server Monitor】{{event}}\n服务器: {{client}}\n详情:\n{{message}}\n时间: {{time}}"
+              placeholder="{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}"
             ></textarea>
           </div>
         </div>
@@ -304,12 +391,11 @@
             <span class="resource-alert-count">[{{ resourceAlertRules.length }}]</span>
             <span class="resource-alert-toggle-text">{{ resourceAlertToggleText }}</span>
           </button>
+          <HelpTooltip :text="trans.resourceAlertTip" />
           <button type="button" class="btn btn-primary btn-sm" @click="addResourceAlertRule">+ {{ trans.resourceAlertAddRule }}</button>
         </div>
 
         <div v-if="resourceAlertExpanded" class="resource-alert-body">
-          <p class="text-muted text-sm mt-1">{{ trans.resourceAlertTip }}</p>
-
           <div v-if="resourceAlertRules.length === 0" class="resource-alert-empty text-muted text-sm">
             {{ trans.resourceAlertEmpty }}
           </div>
@@ -399,17 +485,17 @@
             <div class="checkbox-item">
               <input type="checkbox" id="cfg_turnstile_login_enabled" v-model="settings.turnstile_login_enabled">
               <label>{{ trans.enableTurnstileLogin }}</label>
+              <HelpTooltip :text="trans.turnstileLoginTip" />
             </div>
-            <p class="text-muted text-sm mt-1 mb-3">
-              <span class="warning-icon">[i]</span>
-              {{ trans.turnstileLoginTip }}
-            </p>
           </div>
         </div>
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.turnstileSiteKey }}</label>
+            <label class="form-label">
+              {{ trans.turnstileSiteKey }}
+              <HelpTooltip :text="trans.turnstileTip" />
+            </label>
             <input type="text" name="turnstile_site_key" autocomplete="off" v-model="settings.turnstile_site_key" class="form-input" :placeholder="trans.turnstileSiteKeyPlaceholder">
           </div>
 
@@ -424,13 +510,11 @@
           </div>
         </div>
 
-        <p class="text-muted text-sm mt-2">
-          <span class="warning-icon">[i]</span>
-          {{ trans.turnstileTip }}
-        </p>
-
         <div class="form-group mt-4">
-          <label class="form-label">{{ trans.jwtSecret }}</label>
+          <label class="form-label">
+            {{ trans.jwtSecret }}
+            <HelpTooltip :text="trans.jwtSecretTip" />
+          </label>
           <div class="password-input-wrapper">
             <input type="text" name="jwt_secret" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.jwt_secret" :class="['form-input', { 'secret-input-masked': !passwordVisible.jwtSecret }]" placeholder="••••••••••••••••••••••••••••••••">
             <button type="button" class="password-toggle" @click="$emit('toggle-password', 'jwtSecret')">
@@ -439,10 +523,6 @@
           </div>
         </div>
 
-        <p class="text-muted text-sm mt-2">
-          <span class="warning-icon">[i]</span>
-          {{ trans.jwtSecretTip }}
-        </p>
       </div>
 
       <div class="settings-section">
@@ -455,7 +535,10 @@
           </div>
 
           <div class="form-group flex-1">
-            <label class="form-label">Cloudflare API Token</label>
+            <label class="form-label">
+              Cloudflare API Token
+              <HelpTooltip :text="trans.cloudflareTokenTip" />
+            </label>
             <div class="password-input-wrapper">
               <input type="text" name="cloudflare_token" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.cloudflare_token" :class="['form-input', { 'secret-input-masked': !passwordVisible.cloudflareToken }]" :placeholder="trans.cloudflareTokenPlaceholder">
               <button type="button" class="password-toggle" @click="$emit('toggle-password', 'cloudflareToken')">
@@ -468,12 +551,6 @@
         <div class="form-row">
           <div class="form-group  flex-1">
             <button type="button" @click="$emit('query-d1-usage')" class="btn btn-primary btn-lg" :disabled="d1UsageLoading">{{ d1UsageLoading ? '⏳' : '🔍' }} {{ trans.queryD1Quota }}</button>
-          </div>
-          <div class="form-group  flex-1">
-            <p class="text-muted text-sm mt-2">
-              <span class="warning-icon">[i]</span>
-              {{ trans.cloudflareTokenTip }}
-            </p>
           </div>
         </div>
 
@@ -498,9 +575,12 @@
           >
         </div>
 
-        <button type="button" class="btn btn-sm mb-3" @click="$emit('toggle-admin-password-change')">
-          {{ changeAdminPassword ? trans.cancelPasswordChange : trans.changePassword }}
-        </button>
+        <div class="inline-help-action mb-3">
+          <button type="button" class="btn btn-sm" @click="$emit('toggle-admin-password-change')">
+            {{ changeAdminPassword ? trans.cancelPasswordChange : trans.changePassword }}
+          </button>
+          <HelpTooltip :text="trans.apiSecretTip" />
+        </div>
 
         <div v-if="changeAdminPassword" class="form-row">
           <div class="form-group flex-1">
@@ -546,10 +626,6 @@
           </div>
         </div>
 
-        <p class="text-muted text-sm mt-2">
-          <span class="warning-icon">[i]</span>
-          {{ trans.apiSecretTip }}
-        </p>
       </div>
 
       <div class="settings-section">
@@ -592,6 +668,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import HelpTooltip from '../../../components/HelpTooltip.vue'
 import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../../utils/constants.js'
 import { currentLang } from '../../../utils/i18n.js'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
@@ -612,9 +689,22 @@ const props = defineProps({
 
 defineEmits([
   'toggle-password', 'toggle-admin-password-change',
-  'save-settings', 'upload-bg', 'upload-favicon',
+  'save-settings', 'upload-bg', 'upload-bg-mobile', 'upload-favicon',
   'send-test-notification', 'query-d1-usage'
 ])
+
+const commonNotificationTimezones = [
+  'UTC',
+  'Asia/Shanghai',
+  'Asia/Hong_Kong',
+  'Asia/Tokyo',
+  'Asia/Singapore',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Los_Angeles'
+]
+const expireNotificationHourOptions = Array.from({ length: 24 }, (_, hour) => String(hour))
 
 const cspErrors = reactive({
   csp_static: '',
@@ -658,6 +748,50 @@ const longHistoryPointOptions = computed(() => (
       : `${points} points`
   }))
 ))
+
+const wssReportHours = computed(() => {
+  const source = Array.isArray(props.settings.wss_report_hours)
+    ? props.settings.wss_report_hours
+    : Array.from({ length: 24 }, (_, hour) => hour)
+  return source
+    .map(hour => Number(hour))
+    .filter(hour => Number.isInteger(hour) && hour >= 0 && hour <= 23)
+    .filter((hour, index, hours) => hours.indexOf(hour) === index)
+    .sort((a, b) => a - b)
+})
+
+const localHourToUtcHour = hour => new Date(2000, 0, 1, hour, 0, 0, 0).getUTCHours()
+
+const localTimezoneLabel = computed(() => {
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const localTime = props.trans.localTime || 'Local time'
+  return timezone ? `${localTime} · ${timezone}` : localTime
+})
+
+const isLocalWssReportHourSelected = hour => wssReportHours.value.includes(localHourToUtcHour(hour))
+
+const toggleLocalWssReportHour = (hour, checked) => {
+  const utcHour = localHourToUtcHour(hour)
+  const selected = new Set(wssReportHours.value)
+  if (checked) selected.add(utcHour)
+  else selected.delete(utcHour)
+  props.settings.wss_report_hours = Array.from(selected).sort((a, b) => a - b)
+}
+
+const selectAllWssReportHours = () => {
+  props.settings.wss_report_hours = Array.from({ length: 24 }, (_, hour) => hour)
+}
+
+const clearWssReportHours = () => {
+  props.settings.wss_report_hours = []
+}
+
+const formatWssHourRange = hour => {
+  const utcHour = localHourToUtcHour(hour)
+  const localHourText = String(hour).padStart(2, '0')
+  const utcHourText = String(utcHour).padStart(2, '0')
+  return `${localHourText}:00-${localHourText}:59 ${props.trans.localTime} (${utcHourText}:00-${utcHourText}:59 UTC)`
+}
 
 const notificationChannel = computed({
   get: () => props.settings.notification_webhook_enabled ? 'webhook' : 'builtin',

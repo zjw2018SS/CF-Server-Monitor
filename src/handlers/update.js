@@ -8,7 +8,7 @@ import {
 } from '../utils/metrics.js';
 import { createErrorResponse, createUnauthorizedResponse, createNotFoundResponse, createBadRequestResponse } from '../utils/errors.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
-import { getResourceAlertConfig, isWssReportEnabled, loadSiteSettings } from '../utils/settings.js';
+import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings, normalizeBooleanSetting } from '../utils/settings.js';
 import { cacheLatestReportUpdate } from '../utils/latestReportCache.js';
 import {
   hasRecentFrontendRealtimeActivity,
@@ -24,6 +24,10 @@ import {
   serializeCorrection
 } from '../utils/agentConfig.js';
 import { scheduleAgentConfigChanged } from '../utils/agentConfigNotify.js';
+import {
+  BROADCAST_DELETE_FIELDS,
+  HISTORY_METRIC_AGGREGATION_POLICY
+} from '../utils/historyFields.js';
 
 // 将最新一次上报打包成前端可直接消费的 "当前状态" 对象
 // 与 /api/server 和 /api/servers 返回的字段保持一致，便于页面直接合并
@@ -43,33 +47,18 @@ const REALTIME_BATCH_WINDOW_MS = 5 * 1000;
 const RESOURCE_ALERT_BATCH_WINDOW_MS = 25 * 1000;
 const MAX_BATCH_SAMPLES = 300;
 const FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const HISTORY_AGGREGATION_MAX_FIELDS = [
-  'net_in_speed', 'net_out_speed',
-  'disk_read_bps', 'disk_write_bps', 'disk_read_iops',
-  'disk_write_iops', 'disk_await_ms', 'disk_util',
-  'processes', 'tcp_conn', 'udp_conn'
-];
-const HISTORY_AGGREGATION_AVG_FIELDS = [
-  'cpu', 'ram_used', 'swap_used',
-  'ping_ct', 'ping_cu', 'ping_cm', 'ping_bd',
-  'loss_ct', 'loss_cu', 'loss_cm', 'loss_bd'
-];
-const HISTORY_METRIC_AGGREGATION_POLICY = Object.freeze({
-  ...Object.fromEntries(HISTORY_AGGREGATION_MAX_FIELDS.map(field => [field, 'max'])),
-  ...Object.fromEntries(HISTORY_AGGREGATION_AVG_FIELDS.map(field => [field, 'avg']))
-});
 const DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
   DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
 ));
+const AGENT_WSS_MODE_HEADER = 'X-Agent-Wss-Mode';
+const AGENT_WSS_REASON_HEADER = 'X-Agent-Wss-Reason';
+const AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
 let batchQueue = new Map();
 let flushingPromise = null;
 let flushTimer = null;
 let flushDueAt = 0;
 let resolveFlushingPromise = null;
 let frontendSubscriberSnapshot = { checkedAt: 0, count: 0 };
-
-// 用于过滤不需要实时更新的字段
-const BROADCAST_DELETE_FIELDS = ['id', 'name', 'region', 'arch', 'os', 'kernel_version', 'cpu_info', 'cpu_cores', 'expire_date', 'server_group', 'traffic_limit', 'net_rx_monthly', 'net_tx_monthly', 'boot_time', 'timestamp', 'ip_v4', 'ip_v6'];
 
 function normalizeTimestamp(value, fallback = Date.now()) {
   const ts = Number(value);
@@ -329,13 +318,20 @@ async function getCachedFrontendSubscriberCount(env) {
   return count;
 }
 
+function hasResourceAlertNotificationTarget(settings = {}) {
+  if (normalizeBooleanSetting(settings.notification_webhook_enabled) === 'true') {
+    return String(settings.notification_webhook_url || '').trim().length > 0;
+  }
+  return String(settings.tg_bot_token || '').trim().length > 0;
+}
+
 async function getRealtimeBatchIntent(env) {
   if (!env?.METRICS_BROADCASTER) return null;
 
   let resourceAlertEnabled = false;
   try {
     const settings = await loadSiteSettings(env.DB);
-    resourceAlertEnabled = !!settings?.tg_bot_token && getResourceAlertConfig(settings).enabled;
+    resourceAlertEnabled = hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
   } catch (e) {
     console.warn('[broadcast] failed to load realtime gate settings:', e?.message || e);
   }
@@ -371,7 +367,7 @@ async function getBatchFlushDelayMs(env, now = Date.now()) {
 
   try {
     const settings = await loadSiteSettings(env.DB);
-    if (settings?.tg_bot_token && getResourceAlertConfig(settings).enabled) {
+    if (hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled) {
       return RESOURCE_ALERT_BATCH_WINDOW_MS;
     }
   } catch (e) {
@@ -379,6 +375,30 @@ async function getBatchFlushDelayMs(env, now = Date.now()) {
   }
 
   return REALTIME_BATCH_WINDOW_MS;
+}
+
+function buildAgentWssStateHeaders(settings = {}, now = Date.now()) {
+  const state = getWssReportScheduleState(settings, now);
+  return {
+    [AGENT_WSS_MODE_HEADER]: state.mode,
+    [AGENT_WSS_REASON_HEADER]: state.reason
+  };
+}
+
+function createAgentWssScheduleInactiveResponse(settings = {}) {
+  return new Response(JSON.stringify({
+    error: 'Agent WSS report outside active hours',
+    code: 409,
+    text: AGENT_WSS_SCHEDULE_INACTIVE,
+    connection_mode: 'http'
+  }), {
+    status: 409,
+    headers: {
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json',
+      ...buildAgentWssStateHeaders(settings)
+    }
+  });
 }
 
 async function _flushBatch(env) {
@@ -560,6 +580,7 @@ export async function handleUpdate(request, env, ctx) {
 
     try {
       const settings = await loadSiteSettings(env.DB);
+      const wssStateHeaders = buildAgentWssStateHeaders(settings);
       const descriptor = await describeAgentConfig(serverDetail, settings, clientConfigSchema);
       const clientConfigMd5 = (request.headers.get(AGENT_CONFIG_MD5_HEADER) || '').trim().toLowerCase();
       const hasCorrection = descriptor.correction !== null;
@@ -567,7 +588,8 @@ export async function handleUpdate(request, env, ctx) {
       const responseHeaders = {
         'Cache-Control': 'no-store',
         [AGENT_CONFIG_SCHEMA_HEADER]: String(clientConfigSchema),
-        [AGENT_CONFIG_MD5_HEADER]: descriptor.md5
+        [AGENT_CONFIG_MD5_HEADER]: descriptor.md5,
+        ...wssStateHeaders
       };
 
       if (!md5Changed && !hasCorrection) {
@@ -660,11 +682,15 @@ export async function handleWebSocketUpgrade(request, env) {
 
 export async function handleUpdateWebSocketUpgrade(request, env) {
   const settings = await loadSiteSettings(env.DB);
-  if (!isWssReportEnabled(settings)) {
+  if (!isWssReportConfigured(settings)) {
     return new Response(JSON.stringify({ error: 'Agent WSS report disabled', code: 403 }), {
       status: 403,
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+  const scheduleState = getWssReportScheduleState(settings);
+  if (!scheduleState.active) {
+    return createAgentWssScheduleInactiveResponse(settings);
   }
   return forwardWebSocketUpgrade(request, env, '/update', '[update-ws]');
 }

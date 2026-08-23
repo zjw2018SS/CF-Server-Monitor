@@ -52,7 +52,6 @@
           class="metric-ring-chart metric-ring-chart-memory"
           :class="{ 'has-swap-ring': hasSwapData }"
           :style="getMemoryRingStyle(ramPercent, getUsageColor(ramPercent), swapPercent, getUsageColor(swapPercent))"
-          :title="memoryUsageTitle"
         >
           <span class="metric-ring-track"></span>
           <span class="metric-ring-progress"></span>
@@ -113,18 +112,27 @@
           <div v-else class="server-card-limit-fill" style="background-image: linear-gradient(to right, #00d4aa, #4da6ff, #ffb870, #f85149);">></div>
         </div>
       </div>
-      <div v-if="hasPingData" class="server-card-ping-row">
-        <span class="server-card-ping-chip" v-for="p in pingList" :key="p.label">
-          <span class="server-card-ping-label">{{ p.label }}</span>
-          <span class="server-card-ping-val" :style="{ color: getPingColor(p.value) }">{{ isPingValid(p.value) ? p.value + 'ms' : trans.timeout }}</span>
-        </span>
-      </div>
+      <ServerLatencyPanel
+        variant="ring"
+        :show-three-net-details="sysConfig.show_three_net_details"
+        :has-three-net-details="hasThreeNetDetails"
+        :three-net-details="threeNetDetails"
+        :has-ping-data="hasPingData"
+        :ping-list="pingList"
+        :timeout-text="trans.timeout"
+        :get-ping-color="getPingColor"
+        :get-loss-color="getLossColor"
+        :format-ping-value="formatPingValue"
+        :format-loss-value="formatLossValue"
+        :is-ping-valid="isPingValid"
+      />
     </div>
   </router-link>
 </template>
 
 <script setup>
 import OsIcon from './OsIcon.vue'
+import ServerLatencyPanel from './ServerLatencyPanel.vue'
 import { DEFAULT_SERVER_CARD_CONFIG, useServerCardData } from '../composables/useServerCardData'
 
 const props = defineProps({
@@ -165,7 +173,6 @@ const {
   expireDateTitle,
   loadAvg,
   ramUsageText,
-  memoryUsageTitle,
   diskUsageText,
   getUsageColor,
   getRingStyle,
@@ -173,8 +180,13 @@ const {
   roundedPercent,
   isPingValid,
   getPingColor,
+  getLossColor,
+  formatPingValue,
+  formatLossValue,
   pingList,
   hasPingData,
+  threeNetDetails,
+  hasThreeNetDetails,
   getPublicAssetUrl,
   tagList,
   tagColorClass,

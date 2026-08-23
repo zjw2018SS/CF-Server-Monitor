@@ -10,7 +10,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.4%20Beta4-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.4%20Beta8-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#license)
@@ -64,7 +64,7 @@ Compared with traditional controller-style monitoring tools, CF-Server-Monitor i
 | --- | --- |
 | Realtime monitoring | CPU, GPU, memory, swap, disk, disk IO, network, connections, process count, load average, uptime |
 | History | 7-day charts, long-range sampling, realtime network speed, monthly traffic and correction |
-| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP/BD nodes |
+| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 real points from the last hour of D1 history and caches them for 2 minutes |
 | Dashboard views | Bar chart, ring chart, table, and map views for desktop and mobile |
 | Admin panel | Server CRUD, drag sorting, hidden servers, import/export, batch delete, database maintenance |
 | Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Go Agent by default, Shell/PowerShell still available |
@@ -99,7 +99,7 @@ Core flow:
 
 Recent changes:
 
-- `2.8.4`: Added Agent WSS reporting for improved real-time data push timeliness, added account Do usage display with optimized Do broadcast requests when no frontend subscription exists to reduce idle quota consumption, added custom Webhook channel in notification settings, and added frontend WSS timeout configuration.
+- `2.8.4`: Added Agent WSS reporting and active hours. Agents use POST outside selected hours to reduce Do duration, and this requires Agent `v1.0.10+`. Also added account Do usage display with optimized Do broadcast requests when no frontend subscription exists to reduce idle quota consumption, added custom Webhook channel in notification settings, and added frontend WSS timeout configuration.
 - `2.8.3`: Added disk IO metrics, switched the default Agent to Go, and added realtime latency / packet-loss windows.
 - `2.8.2`: Added Go Agent support.
 - `2.8.1`: Optimized long-range D1 history reads, added resource load notifications, and improved the theme store API.
@@ -256,7 +256,7 @@ npm run build:github-page
 
 | Category | Main options |
 | --- | --- |
-| Site | Title, background, favicon, default display mode, public access |
+| Site | Title, background, favicon, default display mode, three-net details, public access |
 | Server | HTTP/WSS report intervals, collect interval, ping nodes, network interfaces, monthly traffic, price, expiration, auto-renew |
 | Security | Admin account, password, JWT Secret, Turnstile |
 | Notifications | Offline alerts, expiration reminders, resource alerts, test notification |
@@ -320,10 +320,10 @@ Default notification template:
 
 ```text
 {{emoji}}【CF Server Monitor】{{event}}
-服务器: {{client}}
-详情:
+
 {{message}}
-时间: {{time}}
+
+{{time}}
 ```
 
 Available template variables:
@@ -335,76 +335,15 @@ Available template variables:
 | `{{client}}` / `{{clients}}` | Server names in this notification, joined by comma for multiple servers |
 | `{{count}}` | Number of affected servers; not shown by the default template, but available for custom templates |
 | `{{message}}` | Detailed notification list |
-| `{{time}}` | Send time |
+| `{{time}}` | Send time formatted in the notification timezone |
 | `{{notification}}` | Full content after applying the notification template, usually used as Webhook `content` |
 | `{{title}}` | Fixed title `💌 Cloudflare Server Monitor` |
 
 Supported alert types:
 
 - Offline alert: notify after a node stays offline for the configured delay; send recovery notice when it returns.
-- Expiration reminder: notify daily 1 to 7 days before expiration, or disable it.
+- Expiration reminder: notify daily 1 to 7 days before expiration at the configured notification timezone and expiration notification time, or disable it.
 - Resource alert: define rules for CPU, memory, disk, inbound/outbound network speed, and similar metrics.
-
-Default template output examples:
-
-```text
-❌【CF Server Monitor】节点离线告警
-服务器: server-a, server-b
-详情:
-• server-a - 2026/8/19 10:21:00
-• server-b - No report
-时间: 2026/8/19 10:25:00
-```
-
-```text
-✅【CF Server Monitor】节点恢复通知
-服务器: server-a, server-b
-详情:
-• server-a
-• server-b
-时间: 2026/8/19 10:30:00
-```
-
-```text
-⚠️【CF Server Monitor】服务器到期提醒
-服务器: vps-hk, vps-sg
-详情:
-• vps-hk - 3 days left (2026-08-22)
-• vps-sg - 1 day left (2026-08-20)
-时间: 2026/8/19 10:35:00
-```
-
-```text
-❌【CF Server Monitor】资源负载告警
-服务器: server-a, server-b
-详情:
-⚠️ **资源负载告警** (2个)
-
-• High CPU / server-a - 平均 5 分钟
-  CPU 平均 92.3% > 80%
-• High RAM / server-b - 窗口样本连续 5 分钟
-  RAM 当前 91.2% > 85%
-时间: 2026/8/19 10:40:00
-```
-
-```text
-✅【CF Server Monitor】资源负载恢复
-服务器: server-a
-详情:
-✅ **资源负载恢复** (1个)
-
-• High CPU / server-a
-  CPU 当前 42.1% < 80%
-时间: 2026/8/19 10:45:00
-```
-
-```text
-✅【CF Server Monitor】测试通知
-服务器: CF Server Monitor
-详情:
-This is a test notification from CF Server Monitor.
-时间: 2026/8/19 10:55:00
-```
 
 Send a test notification before saving.
 
@@ -519,8 +458,8 @@ After upgrading from older versions to versions with GPU, disk IO, packet loss, 
 
 | Cron | Description |
 | --- | --- |
-| `*/1 * * * *` | Detect offline nodes and send alerts every minute |
-| `0 * * * *` | Run hourly combined tasks, including monthly table rotation, old table cleanup, and expiration checks |
+| `*/1 * * * *` | Detect offline nodes/resource alerts every minute |
+| `0 * * * *` | Run hourly combined tasks, including monthly table rotation, old table cleanup, and expiration checks at the configured notification timezone/hour |
 
 ## Local Development
 

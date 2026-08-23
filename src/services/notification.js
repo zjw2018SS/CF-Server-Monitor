@@ -7,8 +7,10 @@ import {
   getResourceAlertRuleThresholds,
   getTgNotifyMinutes,
   loadSiteSettings,
+  normalizeExpireNotificationTime,
   normalizeBooleanSetting,
   normalizeNotificationTemplate,
+  normalizeNotificationTimezone,
   normalizeNotificationWebhookBody,
   normalizeNotificationWebhookFormat,
   normalizeNotificationWebhookHeaders,
@@ -24,14 +26,78 @@ const RESOURCE_ALERT_EVALUATE_SERVER_BATCH_SIZE = 500;
 const RESOURCE_ALERT_STATE_ACTIVE = 'active';
 const RESOURCE_ALERT_STATE_RECOVERED = 'recovered';
 const RESOURCE_ALERT_STATE_KEY = 'resource_alert_state';
+const RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT = 3200;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
-function formatLastReportTime(timestamp) {
+function getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  const timeZone = normalizeNotificationTimezone(timezone);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map(part => [part.type, part.value])
+  );
+  return {
+    year: parts.year,
+    month: parts.month,
+    day: parts.day,
+    hour: parts.hour,
+    minute: parts.minute,
+    second: parts.second
+  };
+}
+
+function formatNotificationTime(timestamp = Date.now(), settings = {}) {
+  const parts = getZonedDateParts(timestamp, settings?.notification_timezone);
+  if (!parts) return '无效时间';
+  const pad = value => String(value).padStart(2, '0');
+  return `${Number(parts.year)}/${Number(parts.month)}/${Number(parts.day)} ` +
+    `${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+}
+
+function formatLastReportTime(timestamp, settings = {}) {
   if (!timestamp) return '无上报记录';
 
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return '无效时间';
+  return formatNotificationTime(timestamp, settings);
+}
 
-  return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+function isExpireNotificationTimeDue(settings = {}, timestamp = Date.now()) {
+  const parts = getZonedDateParts(timestamp, settings.notification_timezone);
+  if (!parts) return false;
+  return Number(parts.hour) === Number(normalizeExpireNotificationTime(settings.expire_notification_time));
+}
+
+function getZonedDateSerial(timestamp, timezone) {
+  const parts = getZonedDateParts(timestamp, timezone);
+  if (!parts) return NaN;
+  return Math.floor(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) / DAY_MS);
+}
+
+function parseDateSerial(dateString) {
+  const match = String(dateString || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return NaN;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return NaN;
+  }
+  return Math.floor(date.getTime() / DAY_MS);
 }
 
 function formatMegabitsPerSecond(value) {
@@ -175,8 +241,8 @@ function getResourceAlertRuleIntervalMs(rule) {
   return Math.max(5, normalizedMinutes) * 60 * 1000;
 }
 
-function formatCurrentTime() {
-  return new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+function formatCurrentTime(settings = {}) {
+  return formatNotificationTime(Date.now(), settings);
 }
 
 function getResourceAlertRuleStateKey(rule, serverId) {
@@ -203,6 +269,102 @@ function getResourceAlertRuleServerIds(rule, servers) {
     ids.push(id);
   }
   return ids;
+}
+
+function formatConciseResourceMetric(metric, valueKey = 'triggerValue') {
+  const label = getResourceMetricLabel(metric);
+  const value = metric?.[valueKey] ?? metric?.current;
+  return `${label} ${formatResourceMetricValue(metric, value)}`;
+}
+
+function buildGroupedResourceAlertEntries(nodes, valueKey = 'triggerValue') {
+  const groups = new Map();
+
+  for (const item of Array.isArray(nodes) ? nodes : []) {
+    const serverName = String(item?.server?.name || '').trim();
+    if (!serverName) continue;
+
+    const sourceMetrics = item.alert?.metrics || item.metrics || [];
+    if (!Array.isArray(sourceMetrics) || sourceMetrics.length === 0) continue;
+
+    let group = groups.get(serverName);
+    if (!group) {
+      group = { serverName, metrics: [], seen: new Set() };
+      groups.set(serverName, group);
+    }
+
+    for (const metric of sourceMetrics) {
+      const text = formatConciseResourceMetric(metric, valueKey);
+      if (!text || group.seen.has(text)) continue;
+      group.seen.add(text);
+      group.metrics.push(text);
+    }
+  }
+
+  return Array.from(groups.values())
+    .filter(group => group.metrics.length > 0)
+    .map(group => ({
+      serverName: group.serverName,
+      text: `${group.serverName}  ${group.metrics.join('  ')}`
+    }));
+}
+
+function appendResourceAlertNotificationChunks(payloads, entries, options) {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+
+  let chunkEntries = [];
+  let chunkClients = [];
+  const flush = () => {
+    if (chunkEntries.length === 0) return;
+
+    const nodeList = chunkEntries.map(entry => entry.text).join('\n');
+    payloads.push({
+      msg: nodeList,
+      context: {
+        event: options.event,
+        emoji: options.emoji,
+        clients: chunkClients,
+        count: new Set(chunkClients).size || chunkEntries.length,
+        message: nodeList
+      }
+    });
+    chunkEntries = [];
+    chunkClients = [];
+  };
+
+  for (const entry of entries) {
+    const candidateEntries = [...chunkEntries, entry];
+    const candidateNodeList = candidateEntries.map(item => item.text).join('\n');
+    const candidate = candidateNodeList;
+    if (chunkEntries.length > 0 && candidate.length > RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT) {
+      flush();
+    }
+    chunkEntries.push(entry);
+    if (entry.serverName) chunkClients.push(entry.serverName);
+  }
+
+  flush();
+}
+
+export function buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes) {
+  const payloads = [];
+  appendResourceAlertNotificationChunks(
+    payloads,
+    buildGroupedResourceAlertEntries(alertNodes, 'triggerValue'),
+    {
+      event: '资源负载告警',
+      emoji: '❌'
+    }
+  );
+  appendResourceAlertNotificationChunks(
+    payloads,
+    buildGroupedResourceAlertEntries(recoveredNodes, 'current'),
+    {
+      event: '资源负载恢复',
+      emoji: '✅'
+    }
+  );
+  return payloads;
 }
 
 async function evaluateResourceAlertRules(stub, ruleRequests) {
@@ -336,8 +498,8 @@ function inferNotificationEmoji(event) {
   return 'ℹ️';
 }
 
-function buildNotificationContext(msg, context = {}) {
-  const now = formatCurrentTime();
+function buildNotificationContext(settings, msg, context = {}) {
+  const now = formatCurrentTime(settings);
   const clients = normalizeNotificationClients(context);
   const count = Number.isFinite(Number(context.count)) && Number(context.count) > 0
     ? Number(context.count)
@@ -467,7 +629,7 @@ function hasNotificationTarget(settings) {
 }
 
 export async function sendNotification(settings, msg, notificationContext = {}) {
-  const context = buildNotificationContext(msg, notificationContext);
+  const context = buildNotificationContext(settings || {}, msg, notificationContext);
   const formattedMsg = formatNotificationMessage(settings || {}, msg, context);
   context.notification = formattedMsg;
   const title = context.title;
@@ -639,8 +801,7 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           chat_id: settings.tg_chat_id,
-          text: formattedMsg,
-          parse_mode: 'Markdown'
+          text: formattedMsg
         })
       });
     } catch (e) {
@@ -711,9 +872,9 @@ export async function checkOfflineNodes(db) {
 
     if (offlineNodes.length > 0) {
       const nodeList = offlineNodes
-        .map(n => `• ${n.name} - ${formatLastReportTime(n.lastReportTime)}`)
+        .map(n => `${n.name}  最后上报: ${formatLastReportTime(n.lastReportTime, siteSettings)}`)
         .join('\n');
-      const msg = `⚠️ **节点离线告警** (${offlineNodes.length}个)\n\n${nodeList}`;
+      const msg = nodeList;
       await sendNotification(siteSettings, msg, {
         event: '节点离线告警',
         emoji: '❌',
@@ -724,8 +885,8 @@ export async function checkOfflineNodes(db) {
     }
 
     if (recoveredNodes.length > 0) {
-      const nodeList = recoveredNodes.map(n => `• ${n.name}`).join('\n');
-      const msg = `✅ **节点恢复通知** (${recoveredNodes.length}个)\n\n${nodeList}\n\n**时间:** ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`;
+      const nodeList = recoveredNodes.map(n => n.name).join('\n');
+      const msg = nodeList;
       await sendNotification(siteSettings, msg, {
         event: '节点恢复通知',
         emoji: '✅',
@@ -905,49 +1066,13 @@ export async function checkResourceAlerts(env) {
       }
     }
 
-    const messageSections = [];
-    if (alertNodes.length > 0) {
-      const nodeList = alertNodes.map(({ rule, server, alert }) => {
-        const metrics = alert.metrics.map(formatResourceMetric).join('；');
-        const modeText = alert.mode === 'average' ? '平均' : '窗口样本连续';
-        return `• ${getResourceAlertRuleName(rule)} / ${server.name} - ${modeText} ${rule.intervalMinutes} 分钟\n  ${metrics}`;
-      }).join('\n');
-      messageSections.push(`⚠️ **资源负载告警** (${alertNodes.length}个)\n\n${nodeList}`);
-    }
-
-    if (recoveredNodes.length > 0) {
-      const nodeList = recoveredNodes
-        .map(({ rule, server, metrics }) => {
-          const metricText = (metrics && metrics.length > 0)
-            ? '\n  ' + metrics.map(formatRecoveredResourceMetric).filter(Boolean).join('；')
-            : '';
-          return `• ${getResourceAlertRuleName(rule)} / ${server.name}${metricText}`;
-        })
-        .join('\n');
-      messageSections.push(`✅ **资源负载恢复** (${recoveredNodes.length}个)\n\n${nodeList}`);
-    }
-
     if (stateChanged) {
       await saveResourceAlertState(db, configSignature, alertState, hadStoredState);
     }
 
-    if (messageSections.length > 0) {
-      const msg = `${messageSections.join('\n\n')}\n\n**时间:** ${formatCurrentTime()}`;
-      const notificationClients = [
-        ...alertNodes.map(({ server }) => server.name),
-        ...recoveredNodes.map(({ server }) => server.name)
-      ].filter(Boolean);
-      const notificationError = await sendNotification(siteSettings, msg, {
-        event: alertNodes.length > 0 && recoveredNodes.length > 0
-          ? '资源负载通知'
-          : (alertNodes.length > 0 ? '资源负载告警' : '资源负载恢复'),
-        emoji: alertNodes.length > 0 && recoveredNodes.length > 0
-          ? '⚠️'
-          : (alertNodes.length > 0 ? '❌' : '✅'),
-        clients: notificationClients,
-        count: new Set(notificationClients).size || messageSections.length,
-        message: messageSections.join('\n\n')
-      });
+    const notificationPayloads = buildResourceAlertNotificationPayloads(alertNodes, recoveredNodes);
+    for (const payload of notificationPayloads) {
+      const notificationError = await sendNotification(siteSettings, payload.msg, payload.context);
       if (notificationError) {
         console.warn('[ResourceAlert] notification failed:', notificationError);
       }
@@ -957,16 +1082,21 @@ export async function checkResourceAlerts(env) {
   }
 }
 
-export async function checkExpiringServers(db) {
+export async function checkExpiringServers(db, options = {}) {
   const siteSettings = await loadSiteSettings(db);
+  const now = Number(options?.now || Date.now());
+
+  if (options?.scheduled && !isExpireNotificationTimeDue(siteSettings, now)) {
+    return false;
+  }
 
   try {
     const allServers = await getAllServers(db);
-    const now = Date.now();
     const expiringServers = [];
     const reminderDays = getExpireReminderDays(siteSettings.expire_reminder);
     const shouldNotify = reminderDays > 0 && hasNotificationTarget(siteSettings);
     let hasRenewedServers = false;
+    const currentDateSerial = getZonedDateSerial(now, siteSettings.notification_timezone);
 
     for (const s of allServers) {
       if (!s.expire_date) continue;
@@ -985,11 +1115,10 @@ export async function checkExpiringServers(db) {
 
       if (!shouldNotify) continue;
 
-      const expTime = new Date(s.expire_date).getTime();
-      if (isNaN(expTime)) continue;
+      const expireDateSerial = parseDateSerial(s.expire_date);
+      if (!Number.isFinite(expireDateSerial) || !Number.isFinite(currentDateSerial)) continue;
 
-      const diff = expTime - now;
-      const days = Math.ceil(diff / (1000 * 3600 * 24));
+      const days = expireDateSerial - currentDateSerial;
 
       debug(`[Cron] 检测到服务器 ${s.name} 到期日期 ${s.expire_date}，剩余天数 ${days} 天`);
 
@@ -1003,8 +1132,8 @@ export async function checkExpiringServers(db) {
     }
 
     if (expiringServers.length > 0) {
-      const serverList = expiringServers.map(s => `• ${s.name} - 剩余${s.days}天 (${s.expire_date})`).join('\n');
-      const msg = `⏰ **服务器到期提醒** (${expiringServers.length}个)\n\n${serverList}`;
+      const serverList = expiringServers.map(s => `${s.name}  剩余${s.days}天  ${s.expire_date}`).join('\n');
+      const msg = serverList;
       debug(`[Cron] 发送到期提醒通知: ${msg}`);
       await sendNotification(siteSettings, msg, {
         event: '服务器到期提醒',
@@ -1014,7 +1143,9 @@ export async function checkExpiringServers(db) {
         message: serverList
       });
     }
+    return true;
   } catch (e) {
     console.error('到期检测失败:', e);
+    return false;
   }
 }

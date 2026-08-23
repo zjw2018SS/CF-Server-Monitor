@@ -7,11 +7,42 @@ import {
   buildSparseHistoryQuery,
   shouldUseSparseHistorySampling
 } from './historySampling.js';
+import {
+  createHistoryTableSql,
+  HISTORY_INSERT_COLUMNS
+} from '../utils/historyFields.js';
 
 let dbInitialized = false;
 
 const LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd']);
 const DEFAULT_HISTORY_MAX_POINTS = 160;
+export const DASHBOARD_LATENCY_HISTORY_POINTS = 20;
+const DASHBOARD_LATENCY_HISTORY_HOURS = 1;
+const DASHBOARD_LATENCY_HISTORY_CACHE_TTL = 2 * 60 * 1000;
+const DASHBOARD_LATENCY_HISTORY_CACHE_MAX = 1000;
+const DASHBOARD_LATENCY_HISTORY_QUERY_CONCURRENCY = 20;
+const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd'];
+const DASHBOARD_LATENCY_COLUMNS = LATENCY_NODE_FIELDS
+  .flatMap(field => [`ping_${field}`, `loss_${field}`]);
+const dashboardLatencyHistoryCache = new Map();
+
+function pruneDashboardLatencyHistoryCache(now = Date.now()) {
+  for (const [serverId, entry] of dashboardLatencyHistoryCache) {
+    if (!entry || now - entry.cachedAt > DASHBOARD_LATENCY_HISTORY_CACHE_TTL) {
+      dashboardLatencyHistoryCache.delete(serverId);
+    }
+  }
+
+  while (dashboardLatencyHistoryCache.size > DASHBOARD_LATENCY_HISTORY_CACHE_MAX) {
+    const oldestServerId = dashboardLatencyHistoryCache.keys().next().value;
+    if (oldestServerId === undefined) break;
+    dashboardLatencyHistoryCache.delete(oldestServerId);
+  }
+}
+
+export function clearDashboardLatencyHistoryCache() {
+  dashboardLatencyHistoryCache.clear();
+}
 
 export async function initDatabase(db) {
   if (dbInitialized) return;
@@ -83,55 +114,7 @@ export async function initDatabase(db) {
       SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history'
     `).first();
     if (!historyTableExists) {
-      await db.prepare(`
-        CREATE TABLE IF NOT EXISTS metrics_history (
-          id INTEGER PRIMARY KEY,
-          server_id TEXT NOT NULL,
-          timestamp INTEGER DEFAULT 0,
-          agent_version TEXT DEFAULT '',
-          cpu REAL DEFAULT 0,
-          load_avg TEXT DEFAULT '0',
-          net_in_speed REAL DEFAULT 0,
-          net_out_speed REAL DEFAULT 0,
-          net_rx REAL DEFAULT 0,
-          net_tx REAL DEFAULT 0,
-          processes INTEGER DEFAULT 0,
-          tcp_conn INTEGER DEFAULT 0,
-          udp_conn INTEGER DEFAULT 0,
-          ping_ct INTEGER DEFAULT 0,
-          ping_cu INTEGER DEFAULT 0,
-          ping_cm INTEGER DEFAULT 0,
-          ping_bd INTEGER DEFAULT 0,
-          loss_ct INTEGER DEFAULT NULL,
-          loss_cu INTEGER DEFAULT NULL,
-          loss_cm INTEGER DEFAULT NULL,
-          loss_bd INTEGER DEFAULT NULL,
-          ram_total REAL DEFAULT 0,
-          ram_used REAL DEFAULT 0,
-          swap_total REAL DEFAULT 0,
-          swap_used REAL DEFAULT 0,
-          disk_total REAL DEFAULT 0,
-          disk_used REAL DEFAULT 0,
-          disk_read_bps REAL,
-          disk_write_bps REAL,
-          disk_read_iops REAL,
-          disk_write_iops REAL,
-          disk_await_ms REAL,
-          disk_util REAL,
-          cpu_cores INTEGER DEFAULT 0,
-          cpu_info TEXT DEFAULT '',
-          gpu_info TEXT DEFAULT '',
-          arch TEXT DEFAULT '',
-          os TEXT DEFAULT '',
-          kernel_version TEXT DEFAULT '',
-          region TEXT DEFAULT '',
-          ip_v4 TEXT DEFAULT '0',
-          ip_v6 TEXT DEFAULT '0',
-          boot_time TEXT DEFAULT '',
-          net_rx_monthly REAL DEFAULT 0,
-          net_tx_monthly REAL DEFAULT 0
-        )
-      `).run();
+      await db.prepare(createHistoryTableSql('metrics_history')).run();
     }else{
       await ensureHistoryIndex(db);
     }
@@ -160,6 +143,7 @@ export async function clearHistory(db) {
     await saveSiteOptions(db, { history_id_optimized: 'true' });
 
     await clearAllCaches(db);
+    clearDashboardLatencyHistoryCache();
     
     debug('✅ 数据库重建完成');
     
@@ -397,6 +381,153 @@ export async function getMetricsHistory(
   return result;
 }
 
+function normalizeLatencyHistoryValue(value, metricType) {
+  if (isDisabledProbeMetric(value)) return false;
+  if (value === null || value === undefined || value === '') return null;
+
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+
+  if (metricType === 'loss') {
+    return Math.max(0, Math.min(100, Math.round(number)));
+  }
+  return number > 0 ? Math.round(number) : null;
+}
+
+function buildLatencyHistoryPoint(row, metricType) {
+  const timestamp = Number(row?.timestamp);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+
+  const point = { ts: timestamp };
+  for (const field of LATENCY_NODE_FIELDS) {
+    const column = `${metricType}_${field}`;
+    if (!Object.prototype.hasOwnProperty.call(row, column)) continue;
+    const value = normalizeLatencyHistoryValue(row[column], metricType);
+    if (value !== null) point[field] = value;
+  }
+
+  return Object.keys(point).length > 1 ? point : null;
+}
+
+function normalizeDashboardLatencyRows(rows) {
+  const ping = [];
+  const loss = [];
+
+  for (const row of rows || []) {
+    const pingPoint = buildLatencyHistoryPoint(row, 'ping');
+    if (pingPoint) ping.push(pingPoint);
+
+    const lossPoint = buildLatencyHistoryPoint(row, 'loss');
+    if (lossPoint) loss.push(lossPoint);
+  }
+
+  ping.sort((a, b) => a.ts - b.ts);
+  loss.sort((a, b) => a.ts - b.ts);
+  return { ping, loss };
+}
+
+export async function getDashboardLatencyHistory(db, servers, options = {}) {
+  const serverList = Array.isArray(servers) ? servers : [];
+  const serverIds = serverList.map(server => String(server?.id || '').trim()).filter(Boolean);
+  if (serverIds.length === 0) return new Map();
+
+  const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+  const useCache = options.cache !== false;
+  const result = new Map();
+  const serversToFetch = [];
+
+  if (useCache) {
+    pruneDashboardLatencyHistoryCache(now);
+  }
+
+  for (const server of serverList) {
+    const serverId = String(server?.id || '').trim();
+    if (!serverId) continue;
+
+    const cached = dashboardLatencyHistoryCache.get(serverId);
+    if (useCache && cached && now - cached.cachedAt < DASHBOARD_LATENCY_HISTORY_CACHE_TTL) {
+      result.set(serverId, cached.window);
+      continue;
+    }
+    serversToFetch.push(server);
+  }
+
+  if (serversToFetch.length === 0) return result;
+
+  const points = Number.isInteger(options.points) && options.points > 0
+    ? options.points
+    : DASHBOARD_LATENCY_HISTORY_POINTS;
+  const queryEnd = Math.floor(now / 1000) * 1000 + 1000;
+  const cutoff = now - DASHBOARD_LATENCY_HISTORY_HOURS * 60 * 60 * 1000;
+  const columns = DASHBOARD_LATENCY_COLUMNS.join(', ');
+
+  const nowDate = new Date(now);
+  const day = nowDate.getUTCDay();
+  const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
+  const oldTableExists = cutoff < thisSunday.getTime() && !!await db.prepare(
+    `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
+  ).first();
+
+  const fetchServerLatency = async server => {
+    const serverId = String(server?.id || '').trim();
+    if (!serverId) return;
+
+    try {
+      const historyInfo = await getServerHistoryInfo(db, serverId, server);
+      if (!historyInfo.partitionId) {
+        result.set(serverId, { ping: [], loss: [] });
+        return;
+      }
+
+      const queryStart = Math.max(cutoff, historyInfo.startTimestamp);
+      if (queryStart >= queryEnd) {
+        result.set(serverId, { ping: [], loss: [] });
+        return;
+      }
+
+      const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
+      const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
+      const sparseQuery = buildSparseHistoryQuery({
+        columns,
+        queryStart,
+        queryEnd,
+        firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
+        intervalMs,
+        idPrefix,
+        oldTableExists,
+        tableBoundary: thisSunday.getTime()
+      });
+
+      const rawResult = await db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
+      const rows = rawResult.results
+        .filter(row => row.sample_json)
+        .map(row => JSON.parse(row.sample_json));
+      const window = normalizeDashboardLatencyRows(rows);
+      result.set(serverId, window);
+      if (useCache) {
+        dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
+      }
+    } catch (e) {
+      debug('[DashboardLatency] query failed:', serverId, e?.message || e);
+      const empty = { ping: [], loss: [] };
+      result.set(serverId, empty);
+      if (useCache) {
+        dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
+      }
+    }
+  };
+
+  for (let offset = 0; offset < serversToFetch.length; offset += DASHBOARD_LATENCY_HISTORY_QUERY_CONCURRENCY) {
+    await Promise.all(
+      serversToFetch
+        .slice(offset, offset + DASHBOARD_LATENCY_HISTORY_QUERY_CONCURRENCY)
+        .map(fetchServerLatency)
+    );
+  }
+
+  return result;
+}
+
 
 export async function weeklyCleanup(db) {
   try {
@@ -470,26 +601,9 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
 
     await db.prepare(`
     INSERT INTO metrics_history (
-      id, server_id, timestamp, agent_version, cpu, load_avg,
-      net_in_speed, net_out_speed, net_rx, net_tx,
-      processes, tcp_conn, udp_conn,
-      ping_ct, ping_cu, ping_cm, ping_bd,
-      loss_ct, loss_cu, loss_cm, loss_bd,
-      ram_total, ram_used, swap_total, swap_used,
-      disk_total, disk_used,
-      disk_read_bps, disk_write_bps, disk_read_iops, disk_write_iops, disk_await_ms, disk_util,
-      cpu_cores, cpu_info, gpu_info, arch, os, kernel_version, region, ip_v4, ip_v6, boot_time,
-      net_rx_monthly, net_tx_monthly
+      ${HISTORY_INSERT_COLUMNS.join(', ')}
     ) VALUES (
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?, ?,
-      ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?
+      ${HISTORY_INSERT_COLUMNS.map(() => '?').join(', ')}
     )
   `).bind(
     historyId,

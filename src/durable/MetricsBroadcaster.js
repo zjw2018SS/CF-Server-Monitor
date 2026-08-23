@@ -15,7 +15,7 @@
 import { saveMetricsHistory } from '../database/schema.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
-import { isWssReportEnabled, loadSiteSettings } from '../utils/settings.js';
+import { getWssReportScheduleState, loadSiteSettings } from '../utils/settings.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
   AGENT_CONFIG_LEGACY_SCHEMA_VERSION,
@@ -42,7 +42,11 @@ const MAX_SUBSCRIBE_IDS = 500;
 const MAX_SERVER_ID_LENGTH = 64;
 const SERVER_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const WS_POLICY_VIOLATION = 1008;
+const WS_TRY_AGAIN_LATER = 1013;
 const AGENT_REPORT_KIND = 'agent-report';
+const AGENT_WSS_MODE_HEADER = 'X-Agent-Wss-Mode';
+const AGENT_WSS_REASON_HEADER = 'X-Agent-Wss-Reason';
+const AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
 const DEFAULT_AGENT_HISTORY_WRITE_INTERVAL_MS = 60 * 1000;
 const ALLOWED_AGENT_REPORT_INTERVALS = new Set([30, 60, 120, 180]);
 const AGENT_SERVER_DETAIL_TTL_MS = 120 * 1000;
@@ -61,14 +65,6 @@ const RESOURCE_ALERT_MIN_SAMPLE_RATIO = 0.4;
 const RESOURCE_ALERT_MIN_SAMPLE_COUNT = 2;
 const RESOURCE_ALERT_MODE_AVERAGE = 'average';
 const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
-const LATENCY_WINDOW_STORAGE_PREFIX = 'latency_windows:';
-const LATENCY_WINDOW_BUCKET_MS = 2 * 60 * 1000;
-const LATENCY_WINDOW_MAX_BUCKETS = 30;
-const LATENCY_WINDOW_MAX_SERVERS = 1000;
-const LATENCY_WINDOW_SHARDS = 32;
-const LATENCY_WINDOW_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
-const LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd'];
-
 function getAlertCutoffMinute(now, buckets) {
   return Math.floor(now / RESOURCE_ALERT_BUCKET_MS) * RESOURCE_ALERT_BUCKET_MS -
     Math.max(0, buckets - 1) * RESOURCE_ALERT_BUCKET_MS;
@@ -270,163 +266,6 @@ function hasSufficientResourceAlertSamples(samples, windowMinutes) {
   return getResourceAlertSampleSpan(samples) >= targetSpan;
 }
 
-function getLatencyCutoffBucket(now) {
-  return Math.floor(now / LATENCY_WINDOW_BUCKET_MS) * LATENCY_WINDOW_BUCKET_MS -
-    Math.max(0, LATENCY_WINDOW_MAX_BUCKETS - 1) * LATENCY_WINDOW_BUCKET_MS;
-}
-
-function getLatencyWindowShard(serverId) {
-  const value = String(serverId || '');
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) {
-    hash = ((hash * 31) + value.charCodeAt(i)) >>> 0;
-  }
-  return hash % LATENCY_WINDOW_SHARDS;
-}
-
-function getLatencyWindowStorageKey(shard) {
-  return `${LATENCY_WINDOW_STORAGE_PREFIX}${shard}`;
-}
-
-function hasOwnLatencyField(source, field) {
-  return Object.prototype.hasOwnProperty.call(source, field);
-}
-
-function isDisabledLatencyProbeValue(value) {
-  return value === false || value === 'false';
-}
-
-function normalizeLatencyProbeValue(value, metricType) {
-  if (isDisabledLatencyProbeValue(value)) return false;
-  if (value === null || value === undefined || value === '') return null;
-
-  const number = Number(value);
-  if (!Number.isFinite(number)) return null;
-
-  if (metricType === 'loss') {
-    return Math.max(0, Math.min(100, Math.round(number)));
-  }
-  return number > 0 ? Math.round(number) : null;
-}
-
-function normalizeLatencyMetricObject(source, metricType) {
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
-
-  const result = {};
-  for (const field of LATENCY_NODE_FIELDS) {
-    if (!hasOwnLatencyField(source, field)) continue;
-    result[field] = normalizeLatencyProbeValue(source[field], metricType);
-  }
-  return result;
-}
-
-function normalizeLatencyWindowSample(sample) {
-  if (!sample || typeof sample !== 'object') return null;
-  const data = sample.data || sample.payload || sample.metrics;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-
-  const ping = {};
-  const loss = {};
-  for (const field of LATENCY_NODE_FIELDS) {
-    const pingField = `ping_${field}`;
-    const lossField = `loss_${field}`;
-    if (hasOwnLatencyField(data, pingField)) {
-      ping[field] = normalizeLatencyProbeValue(data[pingField], 'ping');
-    }
-    if (hasOwnLatencyField(data, lossField)) {
-      loss[field] = normalizeLatencyProbeValue(data[lossField], 'loss');
-    }
-  }
-
-  if (Object.keys(ping).length === 0 && Object.keys(loss).length === 0) return null;
-
-  const ts = normalizeMetricTimestamp(
-    sample.ts || sample.timestamp || data.sample_timestamp || data.last_updated || data.timestamp
-  );
-  return {
-    bucketTs: Math.floor(ts / LATENCY_WINDOW_BUCKET_MS) * LATENCY_WINDOW_BUCKET_MS,
-    ts,
-    ping,
-    loss
-  };
-}
-
-function normalizeStoredLatencyWindowSample(sample) {
-  if (!sample || typeof sample !== 'object') return null;
-  const bucketTs = normalizeMetricTimestamp(sample.b ?? sample.bucketTs ?? sample.ts ?? sample.t, 0);
-  if (!bucketTs) return null;
-
-  const ts = normalizeMetricTimestamp(sample.t ?? sample.ts, bucketTs);
-  const ping = normalizeLatencyMetricObject(sample.p || sample.ping, 'ping');
-  const loss = normalizeLatencyMetricObject(sample.l || sample.loss, 'loss');
-  if (Object.keys(ping).length === 0 && Object.keys(loss).length === 0) return null;
-
-  return {
-    bucketTs: Math.floor(bucketTs / LATENCY_WINDOW_BUCKET_MS) * LATENCY_WINDOW_BUCKET_MS,
-    ts,
-    ping,
-    loss
-  };
-}
-
-function compactLatencyWindowSample(sample) {
-  const result = {
-    b: sample.bucketTs,
-    t: sample.ts
-  };
-  if (sample.ping && Object.keys(sample.ping).length > 0) result.p = sample.ping;
-  if (sample.loss && Object.keys(sample.loss).length > 0) result.l = sample.loss;
-  return result;
-}
-
-function toLatencyPublicPoint(ts, values) {
-  if (!values || typeof values !== 'object') return null;
-  const point = { ts };
-  for (const field of LATENCY_NODE_FIELDS) {
-    if (hasOwnLatencyField(values, field)) point[field] = values[field];
-  }
-  return Object.keys(point).length > 1 ? point : null;
-}
-
-function findNearestLatencySample(samples, targetTs) {
-  let nearest = null;
-  let nearestDistance = Infinity;
-  for (const sample of samples) {
-    const distance = Math.abs(Number(sample.bucketTs) - targetTs);
-    if (distance <= nearestDistance) {
-      nearest = sample;
-      nearestDistance = distance;
-    }
-  }
-  return nearest;
-}
-
-function buildFixedLatencySeries(samples, metricType) {
-  const metricSamples = (Array.isArray(samples) ? samples : [])
-    .filter(sample => sample && sample[metricType] && Object.keys(sample[metricType]).length > 0)
-    .sort((a, b) => a.bucketTs - b.bucketTs);
-  if (metricSamples.length === 0) return [];
-
-  const endBucket = metricSamples[metricSamples.length - 1].bucketTs;
-  const startBucket = endBucket - (LATENCY_WINDOW_MAX_BUCKETS - 1) * LATENCY_WINDOW_BUCKET_MS;
-  const result = [];
-
-  for (let i = 0; i < LATENCY_WINDOW_MAX_BUCKETS; i++) {
-    const targetTs = startBucket + i * LATENCY_WINDOW_BUCKET_MS;
-    const nearest = findNearestLatencySample(metricSamples, targetTs);
-    const point = toLatencyPublicPoint(targetTs, nearest?.[metricType]);
-    if (point) result.push(point);
-  }
-
-  return result;
-}
-
-function toLatencyPublicWindow(serverId, samples) {
-  const ping = buildFixedLatencySeries(samples, 'ping');
-  const loss = buildFixedLatencySeries(samples, 'loss');
-  return { serverId, ping, loss };
-}
-
 export class MetricsBroadcaster {
   constructor(state, env) {
     this.state = state;
@@ -438,10 +277,6 @@ export class MetricsBroadcaster {
     this.resourceAlertSnapshotDirty = false;
     this.resourceAlertLastSnapshotSave = 0;
     this.resourceAlertCacheActiveUntil = 0;
-    this.latencyWindows = new Map();
-    this.latencyWindowLoadedShards = new Set();
-    this.latencyWindowDirtyShards = new Set();
-    this.latencyWindowLastSnapshotSave = new Map();
     this.agentServerDetails = new Map();
     this.agentHistoryWrites = new Map();
     this.standardAgentWebSocketCount = 0;
@@ -656,16 +491,55 @@ export class MetricsBroadcaster {
     return ws;
   }
 
-  _closeWsWithError(ws, message, code = 400) {
+  _closeWsWithError(ws, message, code = 400, extra = {}, closeCode = WS_POLICY_VIOLATION, closeReason = message) {
     this._sendWsJson(ws, {
       type: 'error',
       ts: Date.now(),
       error: message,
-      code
+      code,
+      ...extra
     });
     try {
-      ws.close(WS_POLICY_VIOLATION, message);
+      ws.close(closeCode, closeReason);
     } catch (_) {}
+  }
+
+  _closeWsForInactiveAgentSchedule(ws) {
+    this._closeWsWithError(
+      ws,
+      'Agent WSS report outside active hours',
+      409,
+      {
+        text: AGENT_WSS_SCHEDULE_INACTIVE,
+        connection_mode: 'http'
+      },
+      WS_TRY_AGAIN_LATER,
+      AGENT_WSS_SCHEDULE_INACTIVE
+    );
+  }
+
+  _createAgentWssUnavailableResponse(scheduleState) {
+    if (!scheduleState?.configured) {
+      return new Response(JSON.stringify({ error: 'Agent WSS report disabled', code: 403 }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    return new Response(JSON.stringify({
+      error: 'Agent WSS report outside active hours',
+      code: 409,
+      text: AGENT_WSS_SCHEDULE_INACTIVE,
+      connection_mode: 'http'
+    }), {
+      status: 409,
+      headers: {
+        'Cache-Control': 'no-store',
+        'Content-Type': 'application/json',
+        [AGENT_WSS_MODE_HEADER]: scheduleState.mode,
+        [AGENT_WSS_REASON_HEADER]: scheduleState.reason
+      }
+    });
   }
 
   _decodeWsMessage(message) {
@@ -1005,6 +879,55 @@ export class MetricsBroadcaster {
     return { matched, closed };
   }
 
+  _closeInactiveAgentReportWebSockets() {
+    let matched = 0;
+    let closed = 0;
+
+    for (const ws of this._getAgentReportWebSockets()) {
+      const attachment = ws.deserializeAttachment() || {};
+      if (attachment.kind !== AGENT_REPORT_KIND) continue;
+      matched += 1;
+
+      try {
+        this._closeWsForInactiveAgentSchedule(ws);
+        closed += 1;
+      } catch (_) {}
+    }
+
+    return { matched, closed };
+  }
+
+  _nextUtcHourAlarmTime() {
+    const nextHour = new Date();
+    nextHour.setUTCMinutes(60, 0, 0);
+    return nextHour.getTime();
+  }
+
+  async _scheduleAgentWssHourAlarm() {
+    if (!this.state?.storage || typeof this.state.storage.setAlarm !== 'function') return;
+    try {
+      await this.state.storage.setAlarm(this._nextUtcHourAlarmTime());
+    } catch (e) {
+      console.warn('[update-ws] Failed to schedule WSS hour alarm:', e?.message || e);
+    }
+  }
+
+  async alarm() {
+    const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+    const scheduleState = getWssReportScheduleState(settings);
+    if (!scheduleState.configured) {
+      this._closeAgentReportWebSockets();
+      return;
+    }
+    if (!scheduleState.active) {
+      this._closeInactiveAgentReportWebSockets();
+      return;
+    }
+    if (this._getAgentReportWebSockets().length > 0) {
+      await this._scheduleAgentWssHourAlarm();
+    }
+  }
+
   async _handleAgentConfigChanged(request) {
     let body = null;
     try {
@@ -1018,13 +941,15 @@ export class MetricsBroadcaster {
 
     if (body?.agentReportModeChanged === true) {
       const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
-      const wssReportEnabled = isWssReportEnabled(settings);
-      const result = wssReportEnabled
+      const scheduleState = getWssReportScheduleState(settings);
+      const result = scheduleState.active
         ? { matched: 0, closed: 0 }
-        : this._closeAgentReportWebSockets();
+        : (scheduleState.configured
+            ? this._closeInactiveAgentReportWebSockets()
+            : this._closeAgentReportWebSockets());
       return new Response(JSON.stringify({
         ok: true,
-        wssReportEnabled,
+        wssReportEnabled: scheduleState.active,
         ...result
       }), {
         headers: {
@@ -1094,7 +1019,6 @@ export class MetricsBroadcaster {
       await this._ensureResourceAlertSnapshotLoaded();
       await this._cacheResourceAlertSamples(normalizedUpdates, reportTs);
     }
-    await this._cacheLatencyWindowSamples(normalizedUpdates, reportTs);
     this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
     this._broadcastBatch(normalizedUpdates, reportTs);
   }
@@ -1285,6 +1209,24 @@ export class MetricsBroadcaster {
 
     if (msg?.type === 'pong') return;
 
+    const scheduleCheckAfter = Number(attachment.wssScheduleCheckAfter);
+    if (Number.isFinite(scheduleCheckAfter) && Date.now() >= scheduleCheckAfter) {
+      const settings = await loadSiteSettings(this.env.DB);
+      const scheduleState = getWssReportScheduleState(settings);
+      if (!scheduleState.configured) {
+        this._closeWsWithError(ws, 'Agent WSS report disabled', 403);
+        return;
+      }
+      if (!scheduleState.active) {
+        this._closeWsForInactiveAgentSchedule(ws);
+        return;
+      }
+      const nextHour = new Date();
+      nextHour.setUTCMinutes(60, 0, 0);
+      attachment = { ...attachment, wssScheduleCheckAfter: nextHour.getTime() };
+      ws.serializeAttachment(attachment);
+    }
+
     const data = this._normalizeAgentReportData(msg);
     if (!data) {
       this._closeWsWithError(ws, 'Invalid report payload', 400);
@@ -1375,7 +1317,15 @@ export class MetricsBroadcaster {
       return new Response('Forbidden', { status: 403 });
     }
 
+    const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+    const scheduleState = getWssReportScheduleState(settings);
+    if (!scheduleState.active) {
+      return this._createAgentWssUnavailableResponse(scheduleState);
+    }
+
     // @ts-ignore - Cloudflare Workers runtime provides WebSocketPair
+    const nextHour = new Date();
+    nextHour.setUTCMinutes(60, 0, 0);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     const agentSocket = this._acceptStandardAgentWebSocket(server, {
@@ -1387,6 +1337,7 @@ export class MetricsBroadcaster {
       agentVersion: normalizeAgentVersion(request.headers.get('X-Agent-Version')),
       reportIntervalMs: DEFAULT_AGENT_HISTORY_WRITE_INTERVAL_MS,
       wssReportIntervalMs: DEFAULT_WSS_REPORT_INTERVAL * 1000,
+      wssScheduleCheckAfter: nextHour.getTime(),
       lastD1WriteTs: 0,
       configSchema: normalizeConfigSchema(firstDefined(
         url.searchParams.get('config_schema'),
@@ -1405,6 +1356,7 @@ export class MetricsBroadcaster {
       ts: Date.now(),
       protocol: 'update'
     });
+    await this._scheduleAgentWssHourAlarm();
 
     const responseHeaders = new Headers();
     if (origin && allowedOrigins.length > 0) {
@@ -1525,10 +1477,6 @@ export class MetricsBroadcaster {
           samples: [{ ts: reportTs, data: payload }]
         }], reportTs);
       }
-      await this._cacheLatencyWindowSamples([{
-        serverId,
-        samples: [{ ts: reportTs, data: payload }]
-      }], reportTs);
       this._broadcast(serverId, payload);
       return new Response(JSON.stringify({ ok: true, subscribers }), {
         headers: { 'Content-Type': 'application/json' }
@@ -1614,12 +1562,7 @@ export class MetricsBroadcaster {
       }
 
       const updates = this._getLatestReportUpdates(normalizedServerIds.ids);
-      const includeLatencyWindows = body?.includeLatencyWindows !== false;
       const payload = { updates };
-
-      if (includeLatencyWindows) {
-        payload.latencyWindows = await this._getLatencyWindowUpdates(normalizedServerIds.ids);
-      }
 
       return new Response(JSON.stringify(payload), {
         headers: {
@@ -1726,198 +1669,6 @@ export class MetricsBroadcaster {
           reportAgeMs: Math.max(0, now - update.reportTs)
         }));
       }
-    }
-    return updates;
-  }
-
-  async _ensureLatencyWindowShardsLoaded(serverIds) {
-    const shards = Array.from(new Set(
-      (Array.isArray(serverIds) ? serverIds : [])
-        .filter(serverId => serverId)
-        .map(serverId => getLatencyWindowShard(serverId))
-    )).filter(shard => !this.latencyWindowLoadedShards.has(shard));
-
-    for (const shard of shards) {
-      await this._loadLatencyWindowShard(shard);
-    }
-  }
-
-  async _loadLatencyWindowShard(shard) {
-    if (this.latencyWindowLoadedShards.has(shard)) return;
-
-    this.latencyWindowLoadedShards.add(shard);
-    try {
-      const snapshot = await this.state.storage.get(getLatencyWindowStorageKey(shard));
-      const windows = Array.isArray(snapshot?.windows) ? snapshot.windows : [];
-      const cutoffBucket = getLatencyCutoffBucket(Date.now());
-
-      for (const item of windows) {
-        if (!item || !item.serverId || !Array.isArray(item.samples)) continue;
-        const serverId = String(item.serverId);
-        if (getLatencyWindowShard(serverId) !== shard) continue;
-
-        const samples = item.samples
-          .map(normalizeStoredLatencyWindowSample)
-          .filter(sample => sample && Number(sample.bucketTs) >= cutoffBucket)
-          .sort((a, b) => a.bucketTs - b.bucketTs)
-          .slice(-LATENCY_WINDOW_MAX_BUCKETS);
-        if (samples.length > 0) {
-          this.latencyWindows.set(serverId, { shard, samples });
-        }
-      }
-
-      this.latencyWindowLastSnapshotSave.set(shard, Number(snapshot?.savedAt) || 0);
-    } catch (e) {
-      console.warn('[latency-window] load snapshot failed:', e.message || e);
-      this.latencyWindowLastSnapshotSave.set(shard, 0);
-    }
-  }
-
-  _pruneLatencyWindows(now = Date.now(), targetShards = null) {
-    const cutoffBucket = getLatencyCutoffBucket(now);
-    const shardFilter = targetShards ? new Set(targetShards) : null;
-    let changed = false;
-
-    for (const [serverId, window] of this.latencyWindows) {
-      const shard = window?.shard ?? getLatencyWindowShard(serverId);
-      if (shardFilter && !shardFilter.has(shard)) continue;
-
-      const originalSamples = Array.isArray(window?.samples) ? window.samples : [];
-      const samples = originalSamples
-        .filter(sample => sample && Number(sample.bucketTs) >= cutoffBucket)
-        .sort((a, b) => a.bucketTs - b.bucketTs)
-        .slice(-LATENCY_WINDOW_MAX_BUCKETS);
-
-      if (samples.length === 0) {
-        this.latencyWindows.delete(serverId);
-        this.latencyWindowDirtyShards.add(shard);
-        changed = true;
-      } else {
-        const sameSamples = samples.length === originalSamples.length &&
-          samples.every((sample, index) => sample === originalSamples[index]);
-        if (!sameSamples) {
-          this.latencyWindowDirtyShards.add(shard);
-          changed = true;
-        }
-        this.latencyWindows.set(serverId, { shard, samples });
-      }
-    }
-
-    while (!shardFilter && this.latencyWindows.size > LATENCY_WINDOW_MAX_SERVERS) {
-      const oldestServerId = this.latencyWindows.keys().next().value;
-      if (oldestServerId === undefined) break;
-      const shard = this.latencyWindows.get(oldestServerId)?.shard ?? getLatencyWindowShard(oldestServerId);
-      this.latencyWindows.delete(oldestServerId);
-      this.latencyWindowDirtyShards.add(shard);
-      changed = true;
-    }
-
-    return changed;
-  }
-
-  async _cacheLatencyWindowSamples(updates, now = Date.now()) {
-    if (!Array.isArray(updates) || updates.length === 0) return;
-
-    const serverIds = updates
-      .map(update => update?.serverId)
-      .filter(Boolean);
-    await this._ensureLatencyWindowShardsLoaded(serverIds);
-    this._pruneLatencyWindows(now);
-
-    const touchedShards = new Set();
-    for (const update of updates) {
-      if (!update || !update.serverId || !Array.isArray(update.samples)) continue;
-      const serverId = String(update.serverId);
-      const shard = getLatencyWindowShard(serverId);
-      const bucketMap = new Map(
-        (this.latencyWindows.get(serverId)?.samples || []).map(sample => [sample.bucketTs, sample])
-      );
-      let changed = false;
-
-      for (const sample of update.samples) {
-        const normalized = normalizeLatencyWindowSample(sample);
-        if (!normalized) continue;
-
-        const existing = bucketMap.get(normalized.bucketTs);
-        if (!existing || normalized.ts >= existing.ts) {
-          bucketMap.set(normalized.bucketTs, normalized);
-          changed = true;
-        }
-      }
-
-      if (!changed) continue;
-
-      const samples = Array.from(bucketMap.values())
-        .filter(sample => sample && Number(sample.bucketTs) >= getLatencyCutoffBucket(now))
-        .sort((a, b) => a.bucketTs - b.bucketTs)
-        .slice(-LATENCY_WINDOW_MAX_BUCKETS);
-
-      if (samples.length > 0) {
-        this.latencyWindows.delete(serverId);
-        this.latencyWindows.set(serverId, { shard, samples });
-      } else {
-        this.latencyWindows.delete(serverId);
-      }
-      this.latencyWindowDirtyShards.add(shard);
-      touchedShards.add(shard);
-    }
-
-    await this._persistLatencyWindowSnapshotsIfNeeded(
-      now,
-      false,
-      touchedShards.size > 0 ? touchedShards : null
-    );
-  }
-
-  async _persistLatencyWindowSnapshotsIfNeeded(now = Date.now(), force = false, targetShards = null) {
-    const shards = new Set(targetShards || this.latencyWindowDirtyShards);
-    if (shards.size === 0) return;
-
-    for (const shard of shards) {
-      if (!this.latencyWindowLoadedShards.has(shard)) continue;
-      if (!force && !this.latencyWindowDirtyShards.has(shard)) continue;
-
-      const lastSave = Number(this.latencyWindowLastSnapshotSave.get(shard)) || 0;
-      if (!force && now - lastSave < LATENCY_WINDOW_SNAPSHOT_INTERVAL_MS) continue;
-
-      this._pruneLatencyWindows(now, [shard]);
-      const windows = [];
-      for (const [serverId, window] of this.latencyWindows) {
-        const windowShard = window?.shard ?? getLatencyWindowShard(serverId);
-        if (windowShard !== shard || !Array.isArray(window?.samples) || window.samples.length === 0) continue;
-        windows.push({
-          serverId,
-          samples: window.samples.map(compactLatencyWindowSample)
-        });
-      }
-
-      try {
-        await this.state.storage.put(getLatencyWindowStorageKey(shard), {
-          savedAt: now,
-          windows
-        });
-        this.latencyWindowDirtyShards.delete(shard);
-        this.latencyWindowLastSnapshotSave.set(shard, now);
-      } catch (e) {
-        console.warn('[latency-window] persist snapshot failed:', e.message || e);
-      }
-    }
-  }
-
-  async _getLatencyWindowUpdates(serverIds) {
-    if (!Array.isArray(serverIds) || serverIds.length === 0) return [];
-
-    await this._ensureLatencyWindowShardsLoaded(serverIds);
-    const now = Date.now();
-    const shards = Array.from(new Set(serverIds.map(serverId => getLatencyWindowShard(serverId))));
-    this._pruneLatencyWindows(now, shards);
-    await this._persistLatencyWindowSnapshotsIfNeeded(now, false, shards);
-
-    const updates = [];
-    for (const serverId of serverIds) {
-      const window = this.latencyWindows.get(String(serverId));
-      if (!window || !Array.isArray(window.samples) || window.samples.length === 0) continue;
-      updates.push(toLatencyPublicWindow(String(serverId), window.samples));
     }
     return updates;
   }
