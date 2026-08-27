@@ -1,7 +1,7 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getLatestMetricsForAllServers } from '../database/schema.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
-import { clearAppearanceSettingsCache, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
+import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createUnauthorizedResponse, createErrorResponse } from '../utils/errors.js';
@@ -11,10 +11,10 @@ import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../da
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
 import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
+import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 
 const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd'];
 const THEME_PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
-const THEME_PREVIEW_AUTH_TTL = 600;
 const DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
 
 function toUsageNumber(value) {
@@ -144,7 +144,7 @@ function buildThemePreviewUrl(request, themeUrl) {
 
 function buildThemePreviewAuthCookie(request, token) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${THEME_PREVIEW_AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${THEME_PREVIEW_AUTH_TTL}; Path=/; HttpOnly; SameSite=Lax${secure}`;
+  return `${THEME_PREVIEW_AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${THEME_PREVIEW_AUTH_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
 
 function buildClearThemePreviewAuthCookie(request) {
@@ -569,6 +569,24 @@ async function handleStartThemePreviewAction({ request, data }) {
   });
 }
 
+async function handleSaveThemeOptionsAction({ env, sys, data }) {
+  const themeOptions = data.theme_options ?? data.settings?.theme_options;
+  if (!isValidThemeOptions(themeOptions)) {
+    return createBadRequestResponse('invalidThemeOptionsFormat');
+  }
+
+  await saveThemeOptions(env.DB, themeOptions);
+  if (sys) {
+    sys.theme_options = themeOptions;
+  }
+
+  return createSuccessResponse({
+    success: true,
+    theme_options: themeOptions,
+    message: 'updateSuccess'
+  });
+}
+
 async function handleListAction({ env }) {
   const servers = await getAllServers(env.DB);
   const latestMetricsMap = await getLatestMetricsForAllServers(env.DB);
@@ -707,6 +725,7 @@ async function handleSendTestNotificationAction({ data }) {
 const AUTHENTICATED_ADMIN_ACTION_HANDLERS = {
   get_settings: handleGetSettingsAction,
   start_theme_preview: handleStartThemePreviewAction,
+  save_theme_options: handleSaveThemeOptionsAction,
   list: handleListAction,
   d1_usage: handleD1UsageAction,
   send_test_notification: handleSendTestNotificationAction
@@ -809,7 +828,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             } else if (field === 'display_mode') {
               appearanceOptions[field] = normalizeDisplayMode(value);
             } else if (field === 'theme_options') {
-              if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+              if (!isValidThemeOptions(value)) {
                 return createBadRequestResponse('invalidThemeOptionsFormat');
               }
               appearanceOptions[field] = value;

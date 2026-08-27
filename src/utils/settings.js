@@ -1,11 +1,13 @@
-const CURRENT_VERSION = '2.8.4 Beta8';
-export const DEFAULT_SITE_TITLE = 'Cloudflare Server Monitor';
+import {
+  DEFAULT_SITE_TITLE,
+  JWT_SECRET_MIN_LENGTH,
+  SITE_SETTINGS_CACHE_TTL_MS
+} from './config.js';
+
 export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_bg_mobile', 'favicon', 'custom_head', 'custom_script', 'csp_static', 'csp_api', 'display_mode', 'theme_options'];
 
 export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'wss_report_hours', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'expire_reminder', 'resource_alert_rules', 'theme_url', 'history_id_optimized','servers_optimized'];
 
-const SITE_SETTINGS_TTL = 120 * 1000;
-const JWT_SECRET_MIN_LENGTH = 32;
 export const TG_NOTIFY_MINUTES_MIN = 2;
 export const TG_NOTIFY_MINUTES_MAX = 30;
 export const TG_NOTIFY_LEGACY_TRUE_MINUTES = 5;
@@ -633,7 +635,7 @@ export async function loadSiteSettings(db, options = {}) {
   }
 
   cachedSiteSettings = result;
-  siteSettingsCacheExpiry = now + SITE_SETTINGS_TTL;
+  siteSettingsCacheExpiry = now + SITE_SETTINGS_CACHE_TTL_MS;
   return result;
 }
 
@@ -676,13 +678,39 @@ export async function loadAppearanceOptions(db) {
   }
 
   cachedAppearanceOptions = result;
-  appearanceOptionsCacheExpiry = now + SITE_SETTINGS_TTL;
+  appearanceOptionsCacheExpiry = now + SITE_SETTINGS_CACHE_TTL_MS;
   return result;
 }
 
 export function clearAppearanceSettingsCache() {
   cachedAppearanceOptions = null;
   appearanceOptionsCacheExpiry = 0;
+}
+
+export function isValidThemeOptions(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export async function saveThemeOptions(db, themeOptions) {
+  await db.prepare(
+    `INSERT INTO settings (key, value)
+     VALUES ('appearance_options', json_object('theme_options', json(?)))
+     ON CONFLICT(key) DO UPDATE SET value = CASE
+       WHEN json_valid(value) THEN CASE
+         WHEN json_type(value) = 'object' THEN json_set(value, '$.theme_options', json(?))
+         ELSE json_object('theme_options', json(?))
+       END
+       ELSE json_object('theme_options', json(?))
+     END`
+  ).bind(
+    JSON.stringify(themeOptions),
+    JSON.stringify(themeOptions),
+    JSON.stringify(themeOptions),
+    JSON.stringify(themeOptions)
+  ).run();
+
+  clearAppearanceSettingsCache();
+  return themeOptions;
 }
 
 export async function loadSettings(db) {
@@ -754,8 +782,4 @@ export function debug(...args) {
   if (isDebugEnabled) {
     console.debug('[DEBUG]', ...args);
   }
-}
-
-export function getCurrentVersion() {
-  return CURRENT_VERSION;
 }
