@@ -1,5 +1,6 @@
 import { initDatabase, weeklyCleanup, getMetricsHistory, clearHistory } from './database/schema.js';
 import { checkOfflineNodes, checkExpiringServers, checkResourceAlerts } from './services/notification.js';
+import { checkBackupHealth } from './services/backupMonitor.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
@@ -483,6 +484,7 @@ export default {
       }
       debug('[Cron] 检查是否到达服务器到期检测时间');
       await checkExpiringServers(env.DB, { scheduled: true, now: now.getTime() });
+      await checkBackupHealth(env, { now: now.getTime() });
     }else if(env.DEBUG == 1){
       if (cron === '0 0 * * 0') {
         debug('[Cron DEBUG] 开始执行每周数据清理任务（表轮换）');
