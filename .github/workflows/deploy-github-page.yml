@@ -1,14 +1,10 @@
 name: Deploy to GitHub Pages
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -16,6 +12,10 @@ concurrency:
 
 jobs:
   check:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     outputs:
       should_deploy: ${{ steps.decide.outputs.should_deploy }}
@@ -32,6 +32,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
 
   build:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     needs: check
     if: needs.check.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
@@ -59,6 +63,10 @@ jobs:
           path: dist
 
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     needs: build
     if: needs.build.result == 'success'
     runs-on: ubuntu-latest

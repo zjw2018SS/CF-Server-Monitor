@@ -1,3 +1,5 @@
+> **Manual upstream updates for this fork.** Synchronize upstream locally; Actions require manual dispatch. Existing CF Git builds are allowed; check deployment impact before pushing. See the [manual update guide](MANUAL-UPDATES.md).
+
 <div align="center">
 
 # CF-Server-Monitor

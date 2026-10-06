@@ -1,3 +1,5 @@
+> **本 Fork 使用手动上游更新。** 上游只在本地同步，GitHub Actions 均手动执行。允许 CF 原生自动构建，推送前核对部署影响。见[手动更新说明](MANUAL-UPDATES.md)。
+
 <div align="center">
 
 # CF-Server-Monitor
