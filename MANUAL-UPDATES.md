@@ -62,5 +62,8 @@ npm run build:frontend
 核对本地 `wrangler.toml` 中既有 Worker、D1、Durable Objects 和域名后，先进行
 `npx wrangler deploy --dry-run`，再独立决定是否使用 `npm run deploy` 部署。
 本地配置与 Actions 生成的生产配置并非默认相同，不要把仓库默认文件直接覆盖生产绑定。
+`keep_vars = true` 会保留未声明的线上变量，但不能阻止本地 `[vars]` 覆盖同名值。
+本地模板不再声明用户名及跨域设置；它们由现有 Worker 管理。部署前仍要读回线上绑定与变量，
+核对 Secrets、D1、Durable Objects、业务 Cron 及备份监控设置；发现差异时先修正实例配置再发布。
 备用的 Workers / GitHub Pages Actions 入口均手动执行，Workers 不接受其他工作流调用。
 Worker 每小时的表轮换和到期检测属于业务定时任务，保留不动。

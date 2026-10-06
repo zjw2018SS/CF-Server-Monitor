@@ -28,8 +28,8 @@ database_name = "server-monitor-db"
 database_id = "c5f653ac-8839-4b19-aec0-f538165f9588"
 
 [vars]
-API_USER_NAME = "admin"
-CORS_ALLOWED_ORIGINS = "https://cfsm.11112003.xyz"
+# 用户名及跨域设置由既有 Worker 管理；keep_vars 保留线上原值。
+# 不在本地模板重复声明，避免手动部署覆盖现有实例配置。
 EDGE_BACKUP_HEALTH_URL = "https://wallos.11112003.xyz/images/uploads/logos/edgeever-backup-health.json"
 
 # Durable Objects：实时指标广播中心
