@@ -17,7 +17,14 @@ import {
   normalizeNotificationWebhookMethod,
   debug
 } from '../utils/settings.js';
-import { detectBillingCycle, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
+import {
+  GB,
+  getTrafficUsageBytes,
+  normalizePct,
+  normalizePctOrNull,
+  normalizeTrafficLimitGb
+} from '../utils/traffic.js';
+import { detectBillingCycle, isEnabledFlag, normalizeBillingCycle, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import {
   NOTIFICATION_MAX_RETRIES,
   NOTIFICATION_RETRY_DELAY_MS,
@@ -623,11 +630,210 @@ async function sendCustomWebhookNotification(settings, context) {
   await fetchWithRetry(endpoint, options);
 }
 
+// SMTP 通知复用 tg_bot_token 字段，配置以 "smtp:" 前缀协议存储（方案 A）。
+// 格式: smtp://<user>:<password>@<host>:<port>?from=<from>&to=<to1,to2>&secure=<auto|tls|starttls>
+export function isSmtpNotificationTarget(token) {
+  // 与前端保持一致：协议头大小写不敏感（SMTP:// 同样识别）
+  return String(token || '').trim().toLowerCase().indexOf('smtp:') === 0;
+}
+
 function hasNotificationTarget(settings) {
   if (normalizeBooleanSetting(settings?.notification_webhook_enabled) === 'true') {
     return String(settings?.notification_webhook_url || '').trim().length > 0;
   }
+  // 内置渠道（含 SMTP）只要 tg_bot_token 非空即视为已配置目标
   return String(settings?.tg_bot_token || '').trim().length > 0;
+}
+
+// ===== 月流量阈值告警（上报路径触发，账期重置=数值回落，状态={u,th,lim}）=====
+const TRAFFIC_ALERT_STATE_KEY = 'traffic_alert_state';
+const TRAFFIC_ALERT_RESET_FACTOR = 0.5;
+
+function parseTrafficAlertState(raw) {
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && Number.isFinite(o.u) && o.u > 0) {
+      return { u: Math.round(o.u), th: normalizePct(o.th), lim: normalizeTrafficLimitGb(o.lim) };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// hooks.patchCache?.(serverId, valueOrNull) —— 缓存实现由调用方注入，本函数不 import 任何 cache 模块
+export async function evaluateTrafficAlert(env, server, metrics, hooks = {}) {
+  try {
+    if (!env?.DB || !server || !metrics) return;
+
+    const limit = normalizeTrafficLimitGb(server.traffic_limit);
+    if (limit <= 0) return; // 未设限额：不监控
+
+    const settings = await loadSiteSettings(env.DB);
+    const globalPct = normalizePct(settings?.traffic_alert_threshold);
+    // 逐台阈值三态：null/未设置 → 跟随全局；数字（含 0）→ 覆盖，0 = 显式关闭该服务器告警
+    const pctServer = normalizePctOrNull(server.traffic_alert_percent);
+    const effectivePct = pctServer === null ? globalPct : pctServer;
+    if (effectivePct <= 0) return;                 // 阈值关闭 / 该服务器显式关闭
+    if (!hasNotificationTarget(settings)) return;  // 未配置通知渠道：不发也不写
+
+    const used = Math.round(getTrafficUsageBytes(
+      metrics.net_rx_monthly,
+      metrics.net_tx_monthly,
+      server.traffic_calc_type
+    ));
+    const limitBytes = limit * GB;
+    const percent = (used / limitBytes) * 100;
+
+    const oldStr = server[TRAFFIC_ALERT_STATE_KEY] == null ? '' : String(server[TRAFFIC_ALERT_STATE_KEY]);
+    const state = parseTrafficAlertState(server[TRAFFIC_ALERT_STATE_KEY]);
+
+    if (state) {
+      // ① 回落=新账期/重装/大校正 → 持久清零（不可只在内存即时重算）
+      if (used < state.u * TRAFFIC_ALERT_RESET_FACTOR) {
+        const { meta } = await env.DB.prepare(
+          `UPDATE servers SET traffic_alert_state = NULL WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+        ).bind(server.id, oldStr).run();
+        if (meta && meta.changes > 0) hooks.patchCache?.(server.id, null);
+        return;
+      }
+      // ② 规则签名一致且未回落 → 同账期已发，抑制
+      if (state.th === effectivePct && state.lim === limit) return;
+      // ③ th/lim 变 → 重新可发，继续
+    }
+
+    if (percent < effectivePct) return; // 未达阈值
+
+    // 先发后写
+    const serverName = server.name || server.id;
+    const msg = `${serverName}  本月已用 ${(used / GB).toFixed(1)} GB / 限额 ${limit} GB（${percent.toFixed(1)}% ≥ ${effectivePct}%）`;
+    const err = await sendNotification(settings, msg, {
+      event: '月流量告警',
+      emoji: '📈',
+      clients: [serverName],
+      count: 1,
+      message: msg
+    });
+    if (err) return; // 失败：不写，下次上报重试
+
+    const newStr = JSON.stringify({ u: used, th: effectivePct, lim: limit });
+    const { meta } = await env.DB.prepare(
+      `UPDATE servers SET traffic_alert_state = ? WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
+    ).bind(newStr, server.id, oldStr).run();
+    if (meta && meta.changes > 0) hooks.patchCache?.(server.id, newStr);
+  } catch (e) {
+    console.error('[traffic-alert] evaluate failed:', e);
+  }
+}
+
+const SMTP_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// 信封地址防注入：剥离 CR/LF 并校验邮箱格式（subject/body 已有 sanitize，信封同样需要）
+function normalizeSmtpAddress(value) {
+  return String(value || '').replace(/[\r\n]/g, '').trim();
+}
+
+function parseSmtpNotificationConfig(rawToken) {
+  const url = new URL(String(rawToken).trim());
+  const host = url.hostname;
+  if (!host) throw new Error('缺少 SMTP 主机');
+
+  const secureParam = (url.searchParams.get('secure') || 'auto').toLowerCase();
+  // 不提供 'off'（明文传输），避免凭据被静默降级为明文发送
+  const allowedSecure = ['auto', 'tls', 'starttls'];
+  const secureTransport = allowedSecure.includes(secureParam) ? secureParam : 'auto';
+  const port = url.port ? Number(url.port) : (secureTransport === 'tls' ? 465 : 587);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error('SMTP 端口无效');
+  }
+  // Cloudflare Workers 永久封禁 25 端口出站
+  if (port === 25) {
+    throw new Error('Cloudflare Workers 不支持 25 端口，请使用 465(implicit TLS) 或 587(STARTTLS)');
+  }
+  // auto 模式下非 465/587 端口会被库推导为明文连接，必须显式指定加密方式
+  if (secureTransport === 'auto' && port !== 465 && port !== 587) {
+    throw new Error('非 465/587 端口必须显式指定加密方式 (secure=tls 或 secure=starttls)');
+  }
+
+  const decode = value => {
+    try {
+      return decodeURIComponent(value);
+    } catch (_) {
+      return value;
+    }
+  };
+  const username = decode(url.username || '');
+  const password = decode(url.password || '');
+  if (!username) throw new Error('缺少 SMTP 用户名');
+  if (!password) throw new Error('缺少 SMTP 密码');
+
+  const from = normalizeSmtpAddress(url.searchParams.get('from') || username);
+  if (!SMTP_EMAIL_PATTERN.test(from)) throw new Error('SMTP 发件人地址无效');
+  const to = (url.searchParams.get('to') || '')
+    .split(',')
+    .map(normalizeSmtpAddress)
+    .filter(Boolean);
+  if (to.length === 0) throw new Error('缺少收件人 (to)');
+  if (to.some(address => !SMTP_EMAIL_PATTERN.test(address))) {
+    throw new Error('SMTP 收件人地址无效');
+  }
+
+  return { host, port, username, password, from, to, secureTransport };
+}
+
+// 仅对临时性失败重试：连接类异常与 4xx（如 421/450 限流、暂时不可用）；
+// 5xx 为永久性拒绝（550 收件人拒绝等），454 为认证失败（部分邮箱如 QQ 使用 4xx 码），
+// 两者重试无意义且易触发邮箱风控
+function isSmtpRetryableError(error) {
+  const match = String(error?.message || error).match(/SMTP error (\d{3})/);
+  if (!match) return true;
+  const code = Number(match[1]);
+  return code >= 400 && code < 500 && code !== 454;
+}
+
+async function withSmtpRetry(task, retries = NOTIFICATION_MAX_RETRIES) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      await task();
+      return;
+    } catch (e) {
+      lastError = e;
+      if (!isSmtpRetryableError(e)) break;
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, NOTIFICATION_RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError || new Error('Max retries exceeded');
+}
+
+async function sendSmtpNotification(settings, context, formattedMsg) {
+  let config;
+  try {
+    config = parseSmtpNotificationConfig(settings.tg_bot_token);
+  } catch (e) {
+    return `SMTP 通知配置错误: ${e.message}`;
+  }
+  try {
+    // 动态导入：cloudflare-smtp 依赖 cloudflare:sockets，仅在运行时（Workers）加载
+    const { sendMail } = await import('cloudflare-smtp');
+    const subject = `${context.emoji || ''} ${context.event || '通知'}`.trim();
+    const text = String(formattedMsg || '').replace(/\*/g, '');
+    await withSmtpRetry(() => sendMail(
+      {
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+        from: config.from,
+        to: config.to,
+        secureTransport: config.secureTransport
+      },
+      { subject, text }
+    ));
+    return;
+  } catch (e) {
+    return `SMTP 邮件通知发送失败: ${e.message}`;
+  }
 }
 
 export async function sendNotification(settings, msg, notificationContext = {}) {
@@ -647,6 +853,10 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
   }
 
   if(!settings.tg_bot_token) return;
+  if (isSmtpNotificationTarget(settings.tg_bot_token)) {
+    // SMTP 邮件通知（前缀协议: smtp://...），置于内置渠道分发链最前
+    return await sendSmtpNotification(settings, context, formattedMsg);
+  }
   if(settings.tg_bot_token.indexOf("onebot:") == 0) {
     // OneBot 协议 (QQ 等)，私聊格式: onebot:http://127.0.0.1:3000/send_private_msg?access_token=xxx
     // 群聊格式: onebot:http://127.0.0.1:3000/send_group_msg?access_token=xxx
@@ -1097,23 +1307,27 @@ export async function checkExpiringServers(db, options = {}) {
     const expiringServers = [];
     const reminderDays = getExpireReminderDays(siteSettings.expire_reminder);
     const shouldNotify = reminderDays > 0 && hasNotificationTarget(siteSettings);
-    let hasRenewedServers = false;
+    const renewedServers = [];
     const currentDateSerial = getZonedDateSerial(now, siteSettings.notification_timezone);
 
     for (const s of allServers) {
       if (!s.expire_date) continue;
 
       const billingCycle = normalizeBillingCycle(detectBillingCycle(s.price) || s.billing_cycle);
-      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, 1);
+      // 续费时机 = 到期日 - min(提醒天数, 5)，最长提前 5 天
+      const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, Math.min(reminderDays, 5));
       if (renewal.renewed) {
         await db.prepare(
           'UPDATE servers SET expire_date = ?, billing_cycle = ? WHERE id = ?'
         ).bind(renewal.expire_date, billingCycle, s.id).run();
         s.expire_date = renewal.expire_date;
         s.billing_cycle = billingCycle;
-        hasRenewedServers = true;
+        renewedServers.push({ name: s.name, expire_date: renewal.expire_date });
         debug(`[Cron] 服务器 ${s.name} 已自动续费，到期日期更新为 ${s.expire_date}`);
       }
+
+      // 勾选自动续费的节点只走「续费成功」提醒，不计入到期提醒
+      if (isEnabledFlag(s.auto_renewal)) continue;
 
       if (!shouldNotify) continue;
 
@@ -1129,21 +1343,42 @@ export async function checkExpiringServers(db, options = {}) {
       }
     }
 
-    if (hasRenewedServers) {
+    if (renewedServers.length > 0) {
       clearServersListCache();
+
+      // 续费成功提醒：与「到期提醒」开关解耦，只要配置了通知渠道就发送
+      if (hasNotificationTarget(siteSettings)) {
+        const renewalList = renewedServers.map(s => `${s.name}  新到期 ${s.expire_date}`).join('\n');
+        debug(`[Cron] 发送自动续费成功通知: ${renewalList}`);
+        try {
+          await sendNotification(siteSettings, renewalList, {
+            event: '服务器自动续费成功',
+            emoji: '✅',
+            clients: renewedServers.map(s => s.name),
+            count: renewedServers.length,
+            message: renewalList
+          });
+        } catch (e) {
+          console.error('自动续费成功通知发送失败:', e);
+        }
+      }
     }
 
     if (expiringServers.length > 0) {
       const serverList = expiringServers.map(s => `${s.name}  剩余${s.days}天  ${s.expire_date}`).join('\n');
       const msg = serverList;
       debug(`[Cron] 发送到期提醒通知: ${msg}`);
-      await sendNotification(siteSettings, msg, {
-        event: '服务器到期提醒',
-        emoji: '⚠️',
-        clients: expiringServers.map(s => s.name),
-        count: expiringServers.length,
-        message: serverList
-      });
+      try {
+        await sendNotification(siteSettings, msg, {
+          event: '服务器到期提醒',
+          emoji: '⚠️',
+          clients: expiringServers.map(s => s.name),
+          count: expiringServers.length,
+          message: serverList
+        });
+      } catch (e) {
+        console.error('服务器到期提醒通知发送失败:', e);
+      }
     }
     return true;
   } catch (e) {

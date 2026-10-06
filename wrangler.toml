@@ -1,4 +1,4 @@
-# Cloudflare Workers 配置；线上由 deploy.yml 接管，push 和上游同步均会触发部署
+# Cloudflare Workers 配置；上游同步手动执行，deploy.yml 仅接受手动触发
 name = "cf-server-monitor"
 main = "src/index.js"
 compatibility_date = "2024-12-01"

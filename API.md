@@ -296,7 +296,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
       "cpu_info": "Intel(R) Xeon(R) CPU",
       "cpu_cores": "4",
       "gpu_info": [
-        { "id": "0", "name": "NVIDIA GeForce RTX 3060", "info": 12.5 }
+        { "id": "0", "name": "NVIDIA GeForce RTX 3060", "info": 12.5, "mem_used": 4096, "mem_total": 12288, "sm_clock": 1700, "power": 125.3 }
       ],
       "processes": "256",
       "tcp_conn": "32",
@@ -360,7 +360,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | `cpu_info`       | string       | -   | 是  | CPU 型号                                      |
 | `cpu_cores`      | string\|number | -   | 是  | 逻辑核心数                                       |
 | ~~`gpu`~~        | number\|null | %   | 否  | ~~独立 GPU 占用字段。~~ **2026-07-26 修订**：旧版探针仍可能发送，但后端没有独立 `gpu` 列，不会持久化，也不会在 API 中返回 |
-| `gpu_info`       | array\|null | - | 否 | 新版格式为 `[{id,name,info}]`；`info` 是占用率。无 GPU 时可为 `null`，入库后会序列化为 JSON 字符串 |
+| `gpu_info`       | array\|null | - | 否 | 新版格式为 `[{id,name,info}]`；`info` 是占用率。元素还可能包含可选键 `mem_used` / `mem_total`（MiB）、`sm_clock`（MHz）、`power`（W），不可获取时省略，后端原样透传。无 GPU 时可为 `null`，入库后会序列化为 JSON 字符串 |
 | `processes`      | string\|number | -   | 是  | 进程数                                         |
 | `tcp_conn`       | string\|number | -   | 是  | TCP 活跃连接数                                   |
 | `udp_conn`       | string\|number | -   | 是  | UDP 套接字数                                    |
@@ -901,8 +901,8 @@ Sec-WebSocket-Version: 13
 
 | 订阅类型 | 推送方式 | 消息类型 | 说明 |
 | -------- | ----- | ----- | --- |
-| `subscribe=all` | 批量合并，每 5 秒一次 | `batchUpdate` | 减少消息数量，降低前端渲染压力 |
-| `subscribe=<serverId>` | 最长约 5 秒批量窗口 | `batchUpdate` | 单台服务器详情页仅过滤目标 ID，消息仍经统一合并队列 |
+| `subscribe=all` | 批量合并 | `batchUpdate` | Agent WSS 上报按 250ms 窗口合并；HTTP 上报最长约 5 秒，减少消息数量和前端渲染压力 |
+| `subscribe=<serverId>` | 实时推送 | `batchUpdate` | 单台服务器更新不进入 250ms 合并窗口，消息格式与全量订阅一致 |
 
 > `subscribe=all` 默认不推送任何服务器更新。客户端应先调用 `/api/servers` 获取当前可见服务器列表，再通过 WebSocket 通道发送 `subscribe` 消息，使用 `servers[].id` 作为过滤列表。
 
@@ -1169,14 +1169,16 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 ```json
 {
   "success": true,
-  "settings": { /* Settings 对象，见 5.4 */ },
+  "settings": { /* Settings 对象（不含 password），并包含 password_configured，见 5.4 */ },
   "api_secret": "<env.API_SECRET>"
 }
 ```
 
+`settings.password` 不会返回；`settings.password_configured` 表示是否已配置独立管理员密码。
+
 > `api_secret` 仅在 `get_settings` 中返回，方便前端展示/复制。
 >
-> ~~`settings` 包含 `jwt_secret`。~~ **2026-07-26 修订**：后端会从返回对象中剔除 `jwt_secret`；其他敏感值（如密码哈希、Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
+> ~~`settings` 包含 `jwt_secret`。~~ **2026-09-19 修订**：后端会从返回对象中剔除 `jwt_secret`、`password` 和 GitHub Client Secret；其他敏感值（如 Cloudflare Token、Turnstile Secret）仍可能存在，必须使用 HTTPS 并限制管理 Token。
 
 ***
 
@@ -1359,7 +1361,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 - `theme_url`：可单独通过 `{"settings":{"theme_url":"..."}}` 保存；允许 `https://github.com/<owner>/<repo>/tree/<commit-or-branch>[/theme-subdir]` 格式。保存前会请求对应 raw `index.html` 验证可用性，失败返回 `400 invalidThemeUrl`，不会保存
 - Ping 节点字段：仅校验本次请求中出现的 `custom_ct/custom_cu/custom_cm/custom_bd` 字段，因此只保存 `theme_url` 不会触发 Ping 节点格式校验
 - Turnstile：本次请求把 `turnstile_enabled` 或 `turnstile_login_enabled` 设为 `true` 时，必须同时提供非空 `turnstile_site_key` 与 `turnstile_secret_key`
-- 通知：规范化后的 `tg_notify` 非 `0`，或 `expire_reminder` 为 `1`-`7` 时，必须提供非空 `tg_bot_token`
+- 通知：规范化后的 `tg_notify` 非 `0`，或 `expire_reminder` 为 `1`-`365` 时，必须提供非空 `tg_bot_token`
 - `notification_timezone`：通知输出时间和到期提醒计划使用的 IANA 时区；缺失或非法值回退为 `UTC`
 - `expire_notification_time`：到期提醒每天在通知时区内执行的小时，取值 `0`-`23`；缺失或非法值回退为 `12`
 - `appearance_options` / `theme_options`：必须是非数组对象；`display_mode` 规范为 `bar` / `ring` / `table`；`preferred_theme` 规范为 `auto` / `dark` / `light`，默认 `auto`；`default_language` 规范为 `auto` / `zh` / `en`，默认 `auto`
@@ -1735,7 +1737,6 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   "success": true,
   "message": "databaseUpgradeSuccess",
   "results": [
-    { "name": "metrics_history 索引检查", "success": true, "created": false, "message": "..." },
     { "name": "servers 表列更新", "success": true, "added": 5 },
     { "name": "servers 表多余字段清理", "success": true, "cleaned": 30, "message": "..." },
     { "name": "metrics_history 表列更新", "success": true, "added": 14 },
@@ -1745,7 +1746,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 }
 ```
 
-~~升级步骤包括 `metrics_history load -> load_avg` 迁移和 `metrics_history` 写入优化。~~ **2026-07-26 修订**：当前顺序为历史表索引检查、补齐 `servers` 列、清理 `servers` 多余列、补齐 `metrics_history` 列、清理废弃设置、删除弃用的 `metrics_aggregated` 表。
+~~升级步骤包括 `metrics_history load -> load_avg` 迁移和 `metrics_history` 写入优化。~~ **修订**：当前顺序为补齐 `servers` 列、清理 `servers` 多余列、补齐 `metrics_history` 列、清理废弃设置、删除弃用的 `metrics_aggregated` 表。历史查询已统一为结构化主键 id 范围模式，不再创建 `(server_id, timestamp)` 二级索引。
 
 ~~任一步骤抛错时返回 HTTP 500。~~ **2026-07-26 修订**：升级函数会捕获未被子步骤处理的错误并返回 `{ "success": false, "message": "databaseUpgradeFailed", "error": "...", "results": [...] }`；路由仍使用成功响应包装，因此通常为 HTTP `200`。各子步骤本身也会捕获错误，所以顶层 `success: true` 时 `results[]` 仍可能含 `success: false`，调用方必须同时检查两层状态。
 
@@ -1847,7 +1848,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | `disk`                                        | object             | 磁盘 IO 当前值：`read_bps` / `write_bps` 为 B/s，`read_iops` / `write_iops` 为 ops/s，`await_ms` 为 ms，`util` 为 %；旧探针、旧历史缺失，或 6 个子字段全为 0 时不返回该对象 |
 | `cpu_cores`                                   | number             | 逻辑核心数                     |
 | `cpu_info`                                    | string             | CPU 型号                    |
-| `gpu_info`                                    | array\|string\|null | GPU 列表。实时上报 / WebSocket 可能是 `[{id,name,info}]` 数组；REST 详情和历史接口通常是同结构的 JSON 字符串，其中 `info` 为占用率 |
+| `gpu_info`                                    | array\|string\|null | GPU 列表。实时上报 / WebSocket 可能是 `[{id,name,info}]` 数组；REST 详情和历史接口通常是同结构的 JSON 字符串，其中 `info` 为占用率。元素还可能包含可选键 `mem_used` / `mem_total`（MiB）、`sm_clock`（MHz）、`power`（W），旧探针上报的数据不含这些键 |
 | `arch`                                        | string             | 架构                        |
 | `os`                                          | string             | OS 名称                     |
 | `kernel_version`                              | string             | 内核版本                    |
@@ -1904,17 +1905,16 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   turnstile_site_key: string,
   turnstile_secret_key: string,
   username: string,
-  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级
+  password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级；get_settings 不返回此字段
   cloudflare_account_id: string,
   cloudflare_token: string,
   custom_ct: string,             // 电信测速节点 host[:port]
   custom_cu: string,             // 联通 host[:port]
   custom_cm: string,             // 移动 host[:port]
   custom_bd: string,             // BGP host[:port]
-  expire_reminder: '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7',
+  expire_reminder: string, // '0'-'365'; 0 disables expiration reminders
   notification_timezone: string, // IANA timezone；默认 UTC
   expire_notification_time: string, // '0'-'23'；默认 12
-  history_id_optimized: 'true' | 'false',
   servers_optimized: 'true' | 'false'
 }
 ```

@@ -12,7 +12,7 @@
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.5%20Stable-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Beta8-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
@@ -25,7 +25,7 @@
 
 CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
-支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
+支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统，并提供 Docker 镜像部署方式。
 
 高安全性：Agent 仅单向上报指标，不提供 WebSSH、远程命令下发或主控通道；支持非 root 运行，可降低监控组件被利用后的影响范围。
 
@@ -69,7 +69,7 @@ CF-Server-Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系
 | 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
 | 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
-| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows，支持 Docker 镜像部署；默认 Go 版本，保留 Shell/PowerShell 版本 |
 | 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
 | 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
 | 多语言       | 前端内置中文和英文切换；文档提供中文与英文入口                                                          |
@@ -99,6 +99,7 @@ flowchart LR
 
 近期变化：
 
+- `2.8.6`：Added GitHub login, WSS frontend subscription with 250ms batch reporting, added SMTP notification channel, added monthly traffic threshold alert, removed legacy database compatibility, added Docker installation method.
 - `2.8.5`：支持自定义 Ping 节点名称；增加ICMP模式；优化WSS响应逻辑；API接口优化；原皮前端优化；新增4个ping节点。
 - `2.8.4`：新增 Agent WSS 上报和 WSS 开启时段，提升实时数据推送及时性，并允许非目标时段自动改用 POST 降低 Do 时长消耗；该能力要求 Agent 升级到 `v1.0.10+`。新增账户Do用量展示，优化无前端订阅时的 Do 实时广播请求，降低空闲额度消耗。通知设置新增自定义 Webhook 渠道, 新增前端wss超时配置。
 - `2.8.3`：新增磁盘 IO 统计，默认 Agent 切换为 Go 版本，新增服务器延迟与丢包率实时窗口。
@@ -228,6 +229,23 @@ loginctl enable-linger 用户名
 
 卸载时请选择原来的安装用户。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，请使用对应系统命令。
 
+### Docker 部署
+
+后台复制安装命令的目标系统支持选择 Docker，会生成如下容器命令（服务器 ID、Secret、Worker 地址已按当前服务器自动填充，镜像标签默认 `latest`，可在 Agent 版本栏自定义）：
+
+```bash
+docker run -d --name cf-probe --restart=unless-stopped --network=host \
+  -v cf-probe-data:/data \
+  -e SERVER_ID=<服务器ID> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<你的后台地址>/update \
+  ghcr.io/huilang-me/cfsm-agent:latest
+```
+
+采集间隔、上报间隔、Ping 节点、网卡、流量重置日、上下行校正等运行参数由 Agent 按 `SERVER_ID` 从后台动态拉取，无需在命令中重复指定；更换镜像标签即回退/升级到指定版本。卸载容器：
+
+```bash
+docker rm -f cf-probe && docker volume rm cf-probe-data
+```
+
 ## 配置说明
 
 ### Worker 环境变量
@@ -284,7 +302,7 @@ npm run build:github-page
 
 ## 通知与告警
 
-在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”和“自定义 Webhook”两种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
+在管理后台 -> 全局设置 -> 通知 中配置。通知分为“内置渠道”、“SMTP 邮件”和“自定义 Webhook”三种渠道；选择自定义 Webhook 后，后端只会发送 Webhook，不会再调用内置渠道。
 
 ### 内置渠道
 
@@ -301,6 +319,24 @@ npm run build:github-page
 | Server 酱    | `https://sctapi.ftqq.com/<SendKey>.send` 或 `server:https://example.com/<SendKey>.send` | 留空          |
 | WxPusher    | `https://wxpusher.zjiecode.com/api/send/message/[SPT_xxx]/Hello` | 留空          |
 | Gotify      | `https://gotify.example.com/message?token=xxx`                   | 留空          |
+
+### SMTP 邮件
+
+选择“SMTP 邮件”渠道后，在设置面板填写 SMTP 服务器、端口、加密方式、用户名、密码、发件人和收件人即可，无需手动拼接配置。后端会将其序列化为 `smtp://` 前缀协议存入 `tg_bot_token` 字段，并通过 [`cloudflare-smtp`](https://github.com/Bruol/cloudflare-smtp)（基于 `cloudflare:sockets`）直连邮件服务器发送纯文本邮件。
+
+配置格式（前端自动生成，手动填写内置渠道 Bot Token 时亦可使用）：
+
+```text
+smtp://<用户名>:<密码>@<host>:<port>?from=<发件人>&to=<收件人1,收件人2>&secure=<auto|tls|starttls>
+```
+
+注意事项：
+
+- **Cloudflare Workers 永久封禁 25 端口出站**，只能使用 `465`（隐式 TLS）或 `587`（STARTTLS）；`secure` 缺省时按端口自动选择。
+- 用户名、密码中的特殊字符需 URL 编码（例如 `@` 写作 `%40`），前端表单会自动处理。
+- QQ 邮箱、163 邮箱等需使用 **SMTP 授权码**而非登录密码；发件人留空时默认等于用户名。
+- 当前仅发送纯文本邮件（不支持 HTML、附件、抄送），发送失败会按 `NOTIFICATION_MAX_RETRIES` 自动重试。
+- 能否成功送达还取决于邮件服务商对 Cloudflare 出口 IP 及 SPF / DKIM 的校验策略。
 
 ### 自定义 Webhook
 
@@ -371,6 +407,15 @@ npm run build:github-page
 ### Turnstile
 
 可在后台启用 Cloudflare Turnstile，用于降低公开 API 和登录入口被刷的风险。多站点模式下，如果多个站点都启用 Turnstile，请保持 Site Key 一致。
+
+### GitHub 登录
+
+1. 在 GitHub `Settings → Developer settings → OAuth Apps` 中创建 [OAuth App](https://github.com/settings/developers)。
+2. 在 CFSM 后台的“管理员登录设置”中填写 Client ID 和 Client Secret，保存配置。
+3. 将后台显示的 `Authorization callback URL` 原样填入 GitHub OAuth App。
+4. 保持管理员密码登录状态，点击“绑定 GitHub 账号”并完成授权。系统会自动保存该账号不可变的 GitHub 数字 ID，此后仅该账号能够使用 GitHub 登录。
+
+GitHub OAuth 配置和绑定结果与其他站点配置一样保存在 D1 的 `site_options` 中，不需要升级数据库结构。Client Secret 不会通过后台设置读取接口返回；再次保存时留空即可保留原值。重新绑定必须处于管理员登录状态，建议保留账号密码登录作为应急入口。
 
 ### CORS
 
@@ -520,6 +565,16 @@ wrangler d1 execute server-monitor-db --file=test/mock-data.sql
 ```
 
 更多本地测试说明见 [test/README.md](test/README.md)。
+
+### 定时任务
+
+```
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=*/1+*+*+*+* // 每分钟执行一次（离线检测）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+*+*+*+* // 每小时执行一次（合并任务）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+0+*+*+0 // 每周执行一次（测试使用）
+https://localhost:8787/cdn-cgi/handler/scheduled?cron=0+12+*+*+* // 每天12点执行一次（测试使用）
+```
+
 
 ### API 检查
 
