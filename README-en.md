@@ -12,12 +12,12 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
   <a href="README-en.md">English</a>
 </p>
 
-[![Workers](https://img.shields.io/badge/Workers-2.8.6%20Beta8-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
+[![Workers](https://img.shields.io/badge/Workers-2.8.7%20Beta1-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
 [![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#license)
 
-[Live Demo](https://demo.huilang.me/) · [API Reference](API.md) · [Go Agent Guide](https://github.com/huilang-me/cfsm-agent) · [Theme Development](theme-develop.md)
+[Live Demo](https://demo.huilang.me/) · [API Reference](API.md) · [Go Agent Guide](https://github.com/huilang-me/cfsm-agent) · [Theme Development](theme-develop.md) · [Theme AI Prompt](theme-ai-prompt.md)
 
 </div>
 
@@ -72,7 +72,7 @@ Compared with traditional controller-style monitoring tools, CF-Server-Monitor i
 | Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows, plus Docker image deployment; Go Agent by default, Shell/PowerShell still available |
 | Realtime push | Durable Objects + WebSocket refresh the UI immediately after Agent reports |
 | Alerts | Offline alerts, recovery notices, expiration reminders, resource load rules |
-| Multi-language | Built-in Chinese and English frontend switch; Chinese and English documentation |
+| Multi-language | Built-in Chinese, English, and Latin American Spanish frontend switch; notifications in Chinese, English, or Spanish; Chinese and English documentation |
 | Multi-site | GitHub Pages static frontend and aggregation of multiple Worker APIs |
 | Widget | iOS Scriptable widget script for quick mobile status checks |
 | Security | API Secret, admin password, JWT, Turnstile, CORS, CSP allowlists |
@@ -101,7 +101,8 @@ Core flow:
 
 Recent changes:
 
-- `2.8.6`: Added GitHub login, WSS frontend subscription with 250ms batch reporting, added SMTP notification channel, added monthly traffic threshold alert, removed legacy database compatibility, added Docker installation method.
+- `2.8.7`：Optimized scheduled task logic to reduce CPU usage and avoid exceeding free-tier limits.
+- `2.8.6`: WSS frontend subscription with 250ms batch reporting, added SMTP notification channel, added monthly traffic threshold alert, removed legacy database compatibility, added Docker installation method.
 - `2.8.5`: Added custom Ping node names, ICMP mode, optimized WSS response logic, API interface optimization, and optimized frontend. Also added 4 default Ping nodes.
 - `2.8.4`: Added Agent WSS reporting and active hours. Agents use POST outside selected hours to reduce Do duration, and this requires Agent `v1.0.10+`. Also added account Do usage display with optimized Do broadcast requests when no frontend subscription exists to reduce idle quota consumption, added custom Webhook channel in notification settings, and added frontend WSS timeout configuration.
 - `2.8.3`: Added disk IO metrics, switched the default Agent to Go, and added realtime latency / packet-loss windows.
@@ -306,6 +307,8 @@ The widget shows online status, CPU, memory, disk, monthly traffic, realtime upl
 
 Configure notifications in Admin -> Global Settings -> Notifications. Notification delivery has three channel modes: built-in channels, SMTP email, and custom Webhook. When custom Webhook is selected, the backend sends only the Webhook request and does not call the built-in channel.
 
+**Notification Language** sets whether alert messages (event names and message text) are sent in Chinese, English, or Spanish. The default is Chinese. Fixed text inside custom templates and Webhook bodies is not translated.
+
 ### Built-in Channels
 
 Built-in channels are detected from the Bot Token format.
@@ -409,15 +412,6 @@ Cloudflare Turnstile can be enabled from the admin panel to reduce abuse of publ
 
 Same-origin access is recommended by default. If you use an external static frontend or multi-site aggregation, add trusted origins to `CORS_ALLOWED_ORIGINS`.
 
-### GitHub Login
-
-1. Create an [OAuth App](https://github.com/settings/developers) under GitHub `Settings → Developer settings → OAuth Apps`.
-2. Enter its Client ID and Client Secret under Admin Login Settings, then save the configuration.
-3. Copy the exact `Authorization callback URL` shown by CFSM into the GitHub OAuth App.
-4. While signed in with the admin password, click Bind GitHub Account and authorize it. CFSM stores the account's immutable numeric GitHub ID, and only that account can use GitHub login afterward.
-
-The GitHub OAuth configuration and binding are stored in the existing D1 `site_options` JSON and do not require a schema upgrade. The Client Secret is not returned by the settings read API; leave it blank on later saves to preserve the stored value. Rebinding requires an authenticated admin session. Keep password login enabled as a recovery path.
-
 ### CSP
 
 The project enables a conservative Content Security Policy by default. Third-party backgrounds, external CSS/JS, fonts, images, and WebSocket/API origins must be added to the CSP allowlists in the admin panel before they can load.
@@ -436,7 +430,10 @@ The project includes a built-in theme and supports:
 - Third-party GitHub tree theme URLs
 - Admin-only theme preview
 
-Third-party themes only proxy `index.html` and `assets/` from the theme repository. The admin panel always uses the built-in theme. See [theme-develop.md](theme-develop.md) for custom theme development.
+Third-party themes only proxy `index.html` and `assets/` from the theme repository. The admin panel always uses the built-in theme. For custom theme development, see:
+
+- [theme-ai-prompt.md](theme-ai-prompt.md): Theme development AI prompt — paste the whole block into an AI coding assistant; includes the core data flow, D1 consumption rules and a pre-delivery checklist (Chinese)
+- [theme-develop.md](theme-develop.md): Full API field reference and auth details
 
 ## Upgrade and Maintenance
 
@@ -599,6 +596,7 @@ CF-Server-Monitor/
 ├── test/                    # Local tests and mock data tools
 ├── API.md                   # REST / WebSocket API reference
 ├── theme-develop.md         # Third-party theme development
+├── theme-ai-prompt.md       # Theme development AI prompt (paste into AI)
 ├── wrangler.toml            # Local Wrangler configuration
 └── version.json             # Worker / Agent versions
 ```
@@ -635,6 +633,11 @@ If the image URL redirects or goes through a CDN redirect, open the browser deve
 
 Open the Cloudflare D1 database `server-monitor-db`, edit the `setting` table, and update the `password` field in `site_options`. The legacy MD5-compatible value `e10adc3949ba59abbe56e057f20f883e` maps to password `123456`. Log in with it and set a strong password in the admin panel.
 
+
+### Domains not hosted on Cloudflare cannot be bound
+
+You can implement reverse proxying by deploying the [CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY) Pages project, allowing you to bind domains that are not hosted on Cloudflare.
+
 ### Servers in mainland China cannot report
 
 Binding a custom probe domain to the Worker is recommended. If needed, you can temporarily map the probe domain to a reachable Cloudflare CDN IP in hosts:
@@ -642,6 +645,8 @@ Binding a custom probe domain to the Worker is recommended. If needed, you can t
 ```bash
 echo <CF_CDN_IP> <your-probe-domain> | sudo tee -a /etc/hosts
 ```
+
+If you are using [CFSM-PROXY](https://github.com/huilang-me/CFSM-PROXY), please manually change the `url` parameter in the installation command to the bound domain.
 
 ### Ping values are abnormal or always 1
 
@@ -682,6 +687,7 @@ The frontend may display Hong Kong, Macao, Taiwan, and country/region informatio
 - [API.md](API.md): REST API, WebSocket, auth, error codes, and data structures
 - [https://github.com/huilang-me/cfsm-agent](cfsm-agent): Go Agent configuration, upgrade, logs, and troubleshooting
 - [theme-develop.md](theme-develop.md): Third-party theme development
+- [theme-ai-prompt.md](theme-ai-prompt.md): Theme development AI prompt — paste it into an AI assistant to build themes that follow project rules
 - [test/README.md](test/README.md): Local mock data and testing workflow
 
 ## Community
@@ -698,6 +704,11 @@ If this project is helpful to you, you can support future maintenance through th
 </p>
 
 - WeChat appreciation: scan the QR code
+
+### Partners & Recommendations
+
+If you need airport transfers, business transportation, or private chauffeur services in the Greater Bay Area, you can consider [Hong Kong Chauffeur](https://hkchauffeur.com/), serving Hong Kong, Shenzhen, Guangzhou, Zhuhai, Macau, and other major cities in the region.
+
 
 ## Credits
 

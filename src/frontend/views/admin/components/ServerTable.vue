@@ -87,15 +87,9 @@
                   <OsIcon :os="server.os" />
                 </span>
                 <a
-                  v-if="themeUrl"
-                  :href="getPublicServerHref(server)"
+                  :href="getServerDetailHref(server)"
                   class="server-name-link"
                 >{{ server.name }}</a>
-                <router-link
-                  v-else
-                  :to="getDefaultServerRoute(server)"
-                  class="server-name-link"
-                >{{ server.name }}</router-link>
               </div>
             </td>
             <td>
@@ -180,7 +174,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { getFlagRegionCode, formatBytes } from '../../../utils/api'
 import { getPublicAssetUrl } from '../../../utils/config'
 import { currentLang } from '../../../utils/i18n'
-import { detectBillingCycle, detectCurrencySymbol, getBillingCycleOption, isEnabledFlag, isFreePrice, normalizeCurrency, normalizePrice } from '../../../utils/server.js'
+import { detectBillingCycle, detectCurrencySymbol, getBillingCycleOption, getLocalizedOptionField, isEnabledFlag, isFreePrice, normalizeCurrency, normalizePrice } from '../../../utils/server.js'
 import OsIcon from '../../../components/OsIcon.vue'
 import HelpTooltip from '../../../components/HelpTooltip.vue'
 
@@ -191,7 +185,6 @@ const props = defineProps({
   groups: { type: Array, default: () => ['Default'] },
   activeTab: { type: String, default: 'servers' },
   selectedApiIndex: { type: Number, default: 0 },
-  themeUrl: { type: String, default: '' },
   latestAgentVersion: { type: String, default: '' },
   copiedServerId: { type: [String, Number], default: null },
   copiedNoteServerId: { type: [String, Number], default: null },
@@ -464,7 +457,7 @@ const formatServerPrice = (server) => {
   if (isFreePrice(price)) return props.trans.free
   const currency = normalizeCurrency(server.currency || detectCurrencySymbol(server.price))
   const option = getBillingCycleOption(detectBillingCycle(server.price) || server.billing_cycle)
-  const cycleLabel = currentLang.value === 'zh' ? option.shortLabelZh : option.shortLabelEn
+  const cycleLabel = getLocalizedOptionField(option, 'shortLabel', currentLang.value)
   return `${currency}${trimDisplayPrice(price)}/${cycleLabel}`
 }
 const isServerAutoRenewal = (server) => isEnabledFlag(server.auto_renewal)
@@ -475,6 +468,6 @@ const getAgentVersionClass = (version) => {
   return normalizeVersion(version) === latest ? 'text-green' : 'text-red'
 }
 const getServerQuery = () => props.selectedApiIndex ? `?apiIndex=${props.selectedApiIndex}` : ''
-const getDefaultServerRoute = (server) => `/server/${server.id}${getServerQuery()}`
-const getPublicServerHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
+// 详情页是公开页面，走域名根路径入口 /#/server/:id
+const getServerDetailHref = (server) => `/#/server/${encodeURIComponent(server.id)}${getServerQuery()}`
 </script>

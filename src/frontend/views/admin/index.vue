@@ -14,9 +14,7 @@
       :turnstile-login-enabled="turnstileLoginEnabled"
       :turnstile-enabled="turnstileEnabled"
       :turnstile-verified="turnstileVerified"
-      :github-o-auth-enabled="githubOAuthEnabled"
       @login="handleLogin"
-      @github-login="handleGithubLogin"
       @toggle-password="togglePassword"
       @api-index-change="handleApiIndexChange"
     />
@@ -115,7 +113,6 @@
           :groups="groups"
           :active-tab="activeTab"
           :selected-api-index="selectedApiIndex"
-          :theme-url="settings.theme_url"
           :latest-agent-version="latestAgentVersion"
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
@@ -148,7 +145,6 @@
           :change-admin-password="changeAdminPassword"
           :test-notification-loading="testNotificationLoading"
           :d1-usage-loading="d1UsageLoading"
-          :github-binding-loading="githubBindingLoading"
           @toggle-password="togglePassword"
           @toggle-admin-password-change="toggleAdminPasswordChange"
           @save-settings="saveSettings"
@@ -157,7 +153,6 @@
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
           @query-d1-usage="queryD1Usage"
-          @bind-github-account="bindGithubAccount"
           @alert-message="alertMessage = $event"
         />
 
@@ -591,14 +586,14 @@ import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
-import { adminApi, login, startGithubLogin, logout as apiLogout, upgradeDatabase, clearHistory, getApiBases, fetchConfig } from '../../utils/api'
-import { hasMultipleApiBases } from '../../utils/config.js'
+import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, fetchConfig } from '../../utils/api'
+import { hasMultipleApiBases, getApiBases } from '../../utils/config.js'
 import { copyTextToClipboard } from '../../utils/clipboard.js'
 import { t, useTranslation } from '../../utils/i18n'
 import { PING_NODE_FIELDS, validatePingNode } from '../../utils/pingNode.js'
 import { normalizeDisplayMode, resolveDisplayMode } from '../../utils/displayMode.js'
 import { applyMikusThemeOptions } from '../../utils/themeOptions.js'
-import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../utils/constants.js'
+import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY, STORAGE } from '../../utils/constants.js'
 import { usePasswordVisibility } from '../../composables/usePasswordVisibility'
 import { useTurnstile } from './composables/useTurnstile'
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../../utils/server.js'
@@ -824,7 +819,12 @@ const normalizePreferredThemeSetting = (value) => {
 
 const normalizeDefaultLanguageSetting = (value) => {
   const language = String(value || '').trim().toLowerCase()
-  return ['zh', 'en', 'auto'].includes(language) ? language : 'auto'
+  return ['zh', 'en', 'es', 'auto'].includes(language) ? language : 'auto'
+}
+
+const normalizeNotificationLanguageSetting = (value) => {
+  const language = String(value || '').trim().toLowerCase()
+  return ['zh', 'en', 'es'].includes(language) ? language : 'zh'
 }
 
 const formatThemeOptions = (value) => {
@@ -949,6 +949,7 @@ const settings = ref({
   tg_bot_token: '',
   tg_chat_id: '',
   notification_timezone: 'UTC',
+  notification_language: 'zh',
   expire_notification_time: '12',
   notification_webhook_enabled: false,
   notification_webhook_url: '',
@@ -961,11 +962,6 @@ const settings = ref({
   turnstile_login_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
-  github_oauth_enabled: false,
-  github_client_id: '',
-  github_client_secret: '',
-  github_client_secret_configured: false,
-  github_user_id: '',
   cloudflare_account_id: '',
   cloudflare_token: '',
   jwt_secret: '',
@@ -1007,12 +1003,12 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'githubClientSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
 ])
 
 const {
   turnstileEnabled, turnstileLoginEnabled, turnstileSiteKey,
-  turnstileToken, turnstileVerified, githubOAuthEnabled,
+  turnstileToken, turnstileVerified,
   hasSharedTurnstileVerified, loadTurnstileConfig: loadTurnstileConfigBase,
   renderTurnstile, resetTurnstile, clearTurnstile
 } = useTurnstile()
@@ -1108,7 +1104,6 @@ const dbLoading = ref(false)
 const dbResult = ref(null)
 const d1UsageLoading = ref(false)
 const d1UsageResult = ref(null)
-const githubBindingLoading = ref(false)
 const validationError = ref(null)
 const alertMessage = ref(null)
 const showAutoUpdateWarning = ref(false)
@@ -1263,34 +1258,6 @@ const handleLogin = async () => {
   loginLoading.value = false
 }
 
-const handleGithubLogin = async () => {
-  loginError.value = ''
-  if ((turnstileLoginEnabled.value || turnstileEnabled.value) && !turnstileToken.value) {
-    loginError.value = 'Please complete the verification'
-    return
-  }
-
-  loginLoading.value = true
-  try {
-    const result = await startGithubLogin(selectedApiIndex.value)
-    if (!result.error && result.data?.authorize_url) {
-      window.location.assign(result.data.authorize_url)
-      return
-    }
-    loginError.value = result.status === 403
-      ? 'Please complete the verification'
-      : trans.value.githubOAuthFailed
-    if (result.status === 403) {
-      clearTurnstile()
-      resetTurnstile('#admin-turnstile-container')
-    }
-  } catch (_) {
-    loginError.value = trans.value.githubOAuthFailed
-  } finally {
-    loginLoading.value = false
-  }
-}
-
 const logout = async () => {
   try {
     await adminApiForSite({ action: 'logout' })
@@ -1305,34 +1272,8 @@ const logout = async () => {
 }
 
 const checkLoginStatus = () => {
-  const token = localStorage.getItem('jwt_token')
+  const token = localStorage.getItem(STORAGE.JWT_TOKEN)
   return !!token || appConfig?.authorization === true
-}
-
-const getGithubLoginError = () => {
-  const error = String(route.query.github_error || '')
-  if (!error) return ''
-  const messages = {
-    not_configured: trans.value.githubOAuthNotConfigured,
-    not_bound: trans.value.githubOAuthNotBound,
-    binding_auth_required: trans.value.githubBindingAuthRequired,
-    invalid_state: trans.value.githubOAuthInvalidState,
-    cancelled: trans.value.githubOAuthCancelled,
-    missing_code: trans.value.githubOAuthFailed,
-    token_exchange_failed: trans.value.githubOAuthFailed,
-    user_lookup_failed: trans.value.githubOAuthFailed,
-    not_allowed: trans.value.githubOAuthNotAllowed,
-    request_failed: trans.value.githubOAuthFailed
-  }
-  return messages[error] || trans.value.githubOAuthFailed
-}
-
-const clearGithubOAuthQuery = () => {
-  if (!route.query.github_bound && !route.query.github_error) return
-  const query = { ...route.query }
-  delete query.github_bound
-  delete query.github_error
-  router.replace({ path: '/admin', query })
 }
 
 const initAdmin = async () => {
@@ -1340,7 +1281,7 @@ const initAdmin = async () => {
   if (hasCreds) {
     isLoggedIn.value = true
     syncApiIndexQuery()
-    const savedTurnstileToken = localStorage.getItem('turnstile_token')
+    const savedTurnstileToken = localStorage.getItem(STORAGE.TURNSTILE_TOKEN)
     if (savedTurnstileToken) {
       turnstileToken.value = savedTurnstileToken
     }
@@ -1349,18 +1290,8 @@ const initAdmin = async () => {
       loadServers(),
       loadLatestAgentVersion()
     ])
-    if (route.query.github_bound === '1') {
-      activeTab.value = 'settings'
-      saveResult.value = { success: true, message: trans.value.githubBindingSuccess }
-    } else if (route.query.github_error) {
-      activeTab.value = 'settings'
-      saveResult.value = { success: false, error: getGithubLoginError() }
-    }
-    clearGithubOAuthQuery()
   } else {
     await loadTurnstileConfig()
-    loginError.value = getGithubLoginError()
-    clearGithubOAuthQuery()
   }
 }
 
@@ -1460,6 +1391,7 @@ const loadSettings = async () => {
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
         notification_timezone: normalizeNotificationTimezoneSetting(settingsData.notification_timezone),
+        notification_language: normalizeNotificationLanguageSetting(settingsData.notification_language),
         expire_notification_time: normalizeExpireNotificationTimeSetting(settingsData.expire_notification_time),
         notification_webhook_enabled: settingsData.notification_webhook_enabled === 'true' || settingsData.notification_webhook_enabled === true,
         notification_webhook_url: settingsData.notification_webhook_url || '',
@@ -1472,11 +1404,6 @@ const loadSettings = async () => {
         turnstile_login_enabled: settingsData.turnstile_login_enabled === 'true',
         turnstile_site_key: settingsData.turnstile_site_key || '',
         turnstile_secret_key: settingsData.turnstile_secret_key || '',
-        github_oauth_enabled: settingsData.github_oauth_enabled === 'true' || settingsData.github_oauth_enabled === true,
-        github_client_id: settingsData.github_client_id || '',
-        github_client_secret: '',
-        github_client_secret_configured: settingsData.github_client_secret_configured === true,
-        github_user_id: settingsData.github_user_id || '',
         cloudflare_account_id: settingsData.cloudflare_account_id || '',
         cloudflare_token: settingsData.cloudflare_token || '',
         jwt_secret: '',
@@ -1592,17 +1519,6 @@ const saveSettings = async () => {
     }
   }
 
-  if (settings.value.github_oauth_enabled) {
-    if (!String(settings.value.github_client_id || '').trim()) {
-      validationError.value = trans.value.githubClientIdRequired
-      return
-    }
-    if (!settings.value.github_client_secret_configured && !String(settings.value.github_client_secret || '').trim()) {
-      validationError.value = trans.value.githubClientSecretRequired
-      return
-    }
-  }
-
   if (isTgNotifyEnabled(settings.value.tg_notify) || isExpireReminderEnabled(settings.value.expire_reminder) || isResourceAlertEnabled(settings.value.resource_alert_rules)) {
     if (isNotificationWebhookEnabled()) {
       if (!settings.value.notification_webhook_url || settings.value.notification_webhook_url.trim().length === 0) {
@@ -1673,6 +1589,7 @@ const saveSettings = async () => {
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
+      notification_language: normalizeNotificationLanguageSetting(settings.value.notification_language),
       expire_notification_time: normalizeExpireNotificationTimeSetting(settings.value.expire_notification_time),
       notification_webhook_enabled: settings.value.notification_webhook_enabled ? 'true' : 'false',
       notification_webhook_url: settings.value.notification_webhook_url,
@@ -1685,8 +1602,6 @@ const saveSettings = async () => {
       turnstile_login_enabled: settings.value.turnstile_login_enabled ? 'true' : 'false',
       turnstile_site_key: settings.value.turnstile_site_key,
       turnstile_secret_key: settings.value.turnstile_secret_key,
-      github_oauth_enabled: settings.value.github_oauth_enabled ? 'true' : 'false',
-      github_client_id: settings.value.github_client_id,
       cloudflare_account_id: settings.value.cloudflare_account_id,
       cloudflare_token: settings.value.cloudflare_token,
       username: settings.value.username,
@@ -1713,11 +1628,6 @@ const saveSettings = async () => {
     data.settings.jwt_secret = jwtSecret
   }
 
-  const githubClientSecret = String(settings.value.github_client_secret || '').trim()
-  if (githubClientSecret) {
-    data.settings.github_client_secret = githubClientSecret
-  }
-
   try {
     const result = await adminApiForSite(data)
     if (!result.error) {
@@ -1726,7 +1636,6 @@ const saveSettings = async () => {
       clearAdminPasswordInputs()
       changeAdminPassword.value = false
       settings.value.jwt_secret = ''
-      settings.value.github_client_secret = ''
       loadSettings()
     } else {
       saveResult.value = { success: false, error: getMessage(result.error) || 'fail' }
@@ -1738,27 +1647,6 @@ const saveSettings = async () => {
   }
 }
 
-
-const bindGithubAccount = async () => {
-  if (githubBindingLoading.value) return
-  githubBindingLoading.value = true
-  saveResult.value = null
-  try {
-    const result = await startGithubLogin(selectedApiIndex.value, 'bind')
-    if (!result.error && result.data?.authorize_url) {
-      window.location.assign(result.data.authorize_url)
-      return
-    }
-    saveResult.value = {
-      success: false,
-      error: getMessage(result.error) || trans.value.githubOAuthFailed
-    }
-  } catch (e) {
-    saveResult.value = { success: false, error: e.message || trans.value.githubOAuthFailed }
-  } finally {
-    githubBindingLoading.value = false
-  }
-}
 
 const loadServers = async () => {
   try {
@@ -2593,6 +2481,7 @@ const sendTestNotification = async () => {
       notification_webhook_body: settings.value.notification_webhook_body,
       notification_template: settings.value.notification_template,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
+      notification_language: normalizeNotificationLanguageSetting(settings.value.notification_language),
       expire_notification_time: normalizeExpireNotificationTimeSetting(settings.value.expire_notification_time)
     })
     if (!result.error) {
