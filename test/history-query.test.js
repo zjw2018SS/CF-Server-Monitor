@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 import {
   buildSparseHistoryQuery,
@@ -90,11 +90,11 @@ test('cross-week sparse query falls back from the old table to the current table
 });
 
 test('D1-compatible SQLite samples 6 hours without scanning the history table', async () => {
-  const miniflare = new Miniflare({
+  const miniflare = new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("OK"); } }',
     d1Databases: { DB: 'history-query-test' }
-  });
+  }));
 
   try {
     const db = await miniflare.getD1Database('DB');

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Miniflare } from 'miniflare';
+import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 import { getDashboardLatencyHistory } from '../src/database/schema.js';
 import { buildHistoryId } from '../src/database/indexOptimization.js';
@@ -10,11 +10,11 @@ import {
 } from '../src/utils/config.js';
 
 function createMiniflare() {
-  return new Miniflare({
+  return new Miniflare(convertV4MiniflareOptions({
     modules: true,
     script: 'export default { fetch() { return new Response("OK"); } }',
     d1Databases: { DB: 'dashboard-latency-window-test' }
-  });
+  }));
 }
 
 async function createHistoryTable(db) {
