@@ -782,16 +782,23 @@ const normalizeResourceAlertIntervalSetting = (value) => {
 
 const normalizeResourceAlertMetricSetting = (value) => {
   const metric = String(value || '').trim()
-  return ['cpu', 'ram', 'disk', 'netIn', 'netOut'].includes(metric) ? metric : 'cpu'
+  return ['cpu', 'ram', 'disk', 'netIn', 'netOut', 'tcpConn', 'udpConn'].includes(metric) ? metric : 'cpu'
 }
 
-const defaultResourceAlertThreshold = (metric) => (
-  metric === 'netIn' || metric === 'netOut' ? '100' : '80'
-)
+const isConnectionAlertMetricSetting = (metric) => metric === 'tcpConn' || metric === 'udpConn'
+
+const defaultResourceAlertThreshold = (metric) => {
+  if (isConnectionAlertMetricSetting(metric)) return '1000'
+  return metric === 'netIn' || metric === 'netOut' ? '100' : '80'
+}
 
 const normalizeResourceAlertThresholdSetting = (value, metric) => {
   if (value === undefined || value === null || value === '') return defaultResourceAlertThreshold(metric)
   const number = Number(value)
+  if (isConnectionAlertMetricSetting(metric)) {
+    if (!Number.isFinite(number) || number <= 0 || number > 10000000) return defaultResourceAlertThreshold(metric)
+    return String(Math.round(number))
+  }
   const max = metric === 'netIn' || metric === 'netOut' ? 100000 : 100
   if (!Number.isFinite(number) || number <= 0 || number > max) return defaultResourceAlertThreshold(metric)
   return String(Math.round(number * 100) / 100)
@@ -1000,7 +1007,8 @@ const settings = ref({
   theme_url: '',
   csp_static: '',
   csp_api: '',
-  ua: 'cfsm'
+  ua: 'cfsm',
+  app_password: ''
 })
 const apiSecret = ref('')
 const cacheRefreshing = ref(false)
@@ -1026,7 +1034,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'ua', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'ua', 'appPassword', 'password', 'confirmPassword'
 ])
 
 const {
@@ -1456,7 +1464,8 @@ const loadSettings = async () => {
         theme_url: settingsData.theme_url || '',
         csp_static: settingsData.csp_static || '',
         csp_api: settingsData.csp_api || '',
-        ua: settingsData.ua || 'cfsm'
+        ua: settingsData.ua || 'cfsm',
+        app_password: settingsData.app_password || ''
       }
       applyMikusThemeOptions(settingsData.theme_options)
       changeAdminPassword.value = !settings.value.password_configured || !String(settings.value.username || '').trim()
@@ -1653,7 +1662,8 @@ const saveSettings = async () => {
       node_1_name: settings.value.node_1_name.trim(), node_2_name: settings.value.node_2_name.trim(), node_3_name: settings.value.node_3_name.trim(), node_4_name: settings.value.node_4_name.trim(),
       csp_static: settings.value.csp_static || '',
       csp_api: settings.value.csp_api || '',
-      ua: String(settings.value.ua ?? '').trim()
+      ua: String(settings.value.ua ?? '').trim(),
+      app_password: String(settings.value.app_password ?? '').trim()
     }
   }
 
@@ -1939,8 +1949,9 @@ const getCustomInstallCommand = () => {
     const ua = installUserAgent()
     const uaEnv = ua ? ` -e UA=${quotePosixShellArg(ua)}` : ''
     return [
-      'docker run -d --name cf-probe --restart=unless-stopped --network=host \\',
+      'docker run -d --name cf-probe --restart=unless-stopped --network=host --pid=host --cap-drop=ALL --cap-add=NET_RAW \\',
       '  -v cf-probe-data:/data \\',
+      '  -v /etc/os-release:/etc/os-release:ro \\',
       `  -e SERVER_ID=${quotePosixShellArg(copyServerId.value)} -e SECRET=${quotePosixShellArg(apiSecret.value)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)}${uaEnv} \\`,
       `  ${image}`
     ].join('\n')
